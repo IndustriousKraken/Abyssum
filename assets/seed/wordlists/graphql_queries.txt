@@ -1,0 +1,21 @@
+Introspection Query|query IntrospectionQuery { __schema { queryType { name } mutationType { name } types { name kind fields { name } } } }
+Users Query|query { users { id name email } }
+Me Query|query { me { id username email } }
+Admin Query|query { admin { id name permissions } }
+All Users|query { allUsers { id username email role } }
+Current User|query { currentUser { id name email phone } }
+Profile|query { profile { id email settings } }
+Settings|query { settings { userId preferences } }
+Orders|query { orders { id amount userId } }
+Payments|query { payments { id amount userId } }
+Roles|query { roles { id name permissions } }
+Permissions|query { permissions { id name } }
+User By ID|query($id: ID!) { user(id: $id) { id name email } }
+Get Posts|query { posts { id title content author { id name } } }
+Comments|query { comments { id content userId } }
+Files|query { files { id name url } }
+Analytics|query { analytics { userId pageViews } }
+Logs|query { logs { id action timestamp } }
+Audit|query { audit { id event userId } }
+System Info|query { systemInfo { version uptime } }
+Config|query { config { key value } }

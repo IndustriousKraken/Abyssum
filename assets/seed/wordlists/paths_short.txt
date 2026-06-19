@@ -1,0 +1,14 @@
+/admin
+/api/admin
+/api/users
+/api/debug
+/api/user/admin
+/api/v1/admin
+/backoffice
+/backoffice/logs
+/dashboard
+/manage
+/settings
+/system
+/api/v1/users
+/api/v2/users

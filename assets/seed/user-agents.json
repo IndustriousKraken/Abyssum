@@ -1,0 +1,18 @@
+{
+  "_comment": "Curated User-Agent pool, preserved from the v1 core/user_agents.py. 'realistic: true' entries form the DEFAULT stealth rotation pool (they look like ordinary browser/mobile traffic and do not announce a scanner). 'realistic: false' entries are available for explicit opt-in but are NEVER used by default, because they trip basic IDS/IPS signatures. Seeded into the database on first run; see openspec/changes/add-seed-data.",
+  "user_agents": [
+    { "name": "Chrome (Windows)", "category": "browser", "realistic": true, "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+    { "name": "Chrome (Mac)", "category": "browser", "realistic": true, "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+    { "name": "Firefox (Windows)", "category": "browser", "realistic": true, "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0" },
+    { "name": "Safari (Mac)", "category": "browser", "realistic": true, "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15" },
+    { "name": "Edge (Windows)", "category": "browser", "realistic": true, "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0" },
+    { "name": "Chrome (Android)", "category": "mobile", "realistic": true, "value": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" },
+    { "name": "Safari (iPhone)", "category": "mobile", "realistic": true, "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1" },
+    { "name": "Chrome (iPhone)", "category": "mobile", "realistic": true, "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1" },
+    { "name": "Googlebot", "category": "bot", "realistic": false, "value": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" },
+    { "name": "Curl", "category": "bot", "realistic": false, "value": "curl/7.88.1" },
+    { "name": "Python Requests", "category": "bot", "realistic": false, "value": "python-requests/2.31.0" },
+    { "name": "Generic Security Scanner", "category": "security", "realistic": false, "value": "Mozilla/5.0 (compatible; SecurityScanner/1.0)" },
+    { "name": "Abyssum Default", "category": "security", "realistic": false, "value": "Abyssum/2.0 (Security Scanner)" }
+  ]
+}

@@ -1,0 +1,69 @@
+# OpenAPI/Swagger Discovery Paths
+# Standard OpenAPI paths
+/openapi.json
+/openapi.yaml
+/openapi.yml
+/api/openapi.json
+/api/openapi.yaml
+/v1/openapi.json
+/v2/openapi.json
+/v3/openapi.json
+
+# Swagger paths
+/swagger.json
+/swagger.yaml
+/swagger.yml
+/api/swagger.json
+/api/swagger.yaml
+/swagger/v1/swagger.json
+/swagger/v2/swagger.json
+/v1/swagger.json
+/v2/swagger.json
+
+# Documentation paths
+/api-docs
+/api-docs/
+/api/docs
+/api/docs/
+/docs
+/docs/
+/documentation
+/api-documentation
+/redoc
+/api/redoc
+
+# Alternative formats
+/spec.json
+/spec.yaml
+/api.json
+/api.yaml
+/schema.json
+/schema.yaml
+/openapi-spec
+/swagger-spec
+
+# Version-specific
+/api/v1/docs
+/api/v2/docs
+/api/v3/docs
+/v1/api-docs
+/v2/api-docs
+/v3/api-docs
+
+# Framework-specific
+/swagger-ui.html
+/swagger-ui/
+/swagger-resources
+/springfox/
+/.well-known/openapi.json
+
+# Additional common paths
+/api/definition
+/api/v1/definition
+/api/specification
+/api/spec
+/apidocs
+/api/apidocs
+/explorer
+/api-explorer
+/api/explorer

@@ -1,0 +1,9 @@
+/graphql
+/api/graphql
+/v1/graphql
+/v2/graphql
+/graphql/admin
+/graphql/query
+/graphql/mutation
+/api/v1/graphql
+/api/v2/graphql
