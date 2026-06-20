@@ -74,6 +74,43 @@ pub struct ScanningConfig {
     pub max_delay: f64,
     /// Maximum number of in-flight requests. Finite and modest by default.
     pub max_concurrency: usize,
+    /// How often the rotating User-Agent is re-drawn (see seed-data, change a04).
+    /// Per-request by default: every outbound request gets a fresh realistic
+    /// identity, the strongest blend-in posture.
+    pub user_agent_rotation: UserAgentRotation,
+}
+
+/// Granularity of the realistic User-Agent rotation (seed-data, a04).
+///
+/// Governs how often the engine re-draws an identity from the realistic pool.
+/// Per-request rotation (the default) varies the User-Agent on every outbound
+/// request; per-scan rotation draws once and holds that identity for the whole
+/// session (steadier, still realistic, useful when a target keys sessions on a
+/// stable User-Agent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAgentRotation {
+    /// Re-draw a realistic identity on every outbound request (default).
+    #[default]
+    PerRequest,
+    /// Draw one realistic identity per scan and hold it for the session.
+    PerScan,
+}
+
+impl std::str::FromStr for UserAgentRotation {
+    type Err = String;
+
+    /// Parse the config/env spelling (`per_request` / `per_scan`), tolerating
+    /// hyphens for convenience.
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "per_request" => Ok(Self::PerRequest),
+            "per_scan" => Ok(Self::PerScan),
+            other => Err(format!(
+                "expected 'per_request' or 'per_scan', got {other:?}"
+            )),
+        }
+    }
 }
 
 /// Logging configuration.
@@ -108,6 +145,7 @@ impl Default for ScanningConfig {
             min_delay: 1.0,
             max_delay: 3.0,
             max_concurrency: 4,
+            user_agent_rotation: UserAgentRotation::default(),
         }
     }
 }
@@ -178,6 +216,10 @@ impl Config {
         }
         if let Some(v) = get_env("ABYSSUM_SCANNING_MAX_CONCURRENCY") {
             self.scanning.max_concurrency = parse_env("ABYSSUM_SCANNING_MAX_CONCURRENCY", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION") {
+            self.scanning.user_agent_rotation =
+                parse_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION", &v)?;
         }
         // Log level: `ABYSSUM_LOG` is the documented short form (see design.md);
         // `ABYSSUM_LOG_LEVEL` follows the sectioned naming. `ABYSSUM_LOG` wins.
@@ -323,6 +365,43 @@ mod tests {
         let env = env_of(&[("ABYSSUM_LOG", "trace")]);
         let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
         assert_eq!(cfg.log.level, "trace");
+    }
+
+    #[test]
+    fn user_agent_rotation_defaults_to_per_request() {
+        // Per-request is the strongest blend-in posture, so it is the default.
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.scanning.user_agent_rotation,
+            UserAgentRotation::PerRequest
+        );
+    }
+
+    #[test]
+    fn user_agent_rotation_from_file_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "scanning:\n  user_agent_rotation: per_scan\n").unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert_eq!(cfg.scanning.user_agent_rotation, UserAgentRotation::PerScan);
+        // Sibling pacing keys keep their defaults.
+        assert_eq!(cfg.scanning.min_delay, 1.0);
+
+        // Env overrides the file and tolerates a hyphenated spelling.
+        let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "per-request")]);
+        let cfg = Config::load_from(&path, env).unwrap();
+        assert_eq!(
+            cfg.scanning.user_agent_rotation,
+            UserAgentRotation::PerRequest
+        );
+    }
+
+    #[test]
+    fn invalid_user_agent_rotation_is_a_config_error() {
+        let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "sometimes")]);
+        let err = Config::load_from("/no/such/file.yaml", env).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
     }
 
     #[test]

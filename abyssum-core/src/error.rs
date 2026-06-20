@@ -52,6 +52,12 @@ pub enum Error {
     #[error("persistence error: {0}")]
     Persistence(String),
 
+    /// Seeding or reading the curated reference-data store failed: a malformed
+    /// bundled asset, or an attempt to build a rotation source from an empty
+    /// User-Agent pool. See the `seed` module.
+    #[error("seed-data error: {0}")]
+    Seed(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

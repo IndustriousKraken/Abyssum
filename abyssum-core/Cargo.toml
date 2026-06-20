@@ -45,3 +45,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
+# The seed-data wire tests build a `ScanContext` (cancellation token) and issue
+# real requests at a loopback listener (target URLs) to prove the rotating
+# User-Agent actually reaches the wire.
+tokio-util = { workspace = true }
+url = { workspace = true }

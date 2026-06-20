@@ -381,6 +381,7 @@ mod tests {
             min_delay: 0.5,
             max_delay: 1.5,
             max_concurrency: 4,
+            ..ScanningConfig::default()
         };
         let rl = RateLimiter::from_config(&sc);
         assert_eq!(rl.inner.min_delay, secs(0.5));
@@ -394,6 +395,7 @@ mod tests {
             min_delay: 3.0,
             max_delay: 1.0,
             max_concurrency: 4,
+            ..ScanningConfig::default()
         };
         let rl = RateLimiter::from_config(&sc);
         assert_eq!(rl.inner.min_delay, secs(3.0));

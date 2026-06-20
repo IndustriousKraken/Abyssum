@@ -611,6 +611,9 @@ fn all_severities_zero() -> BTreeMap<Severity, i64> {
 async fn migrations_are_idempotent_and_preserve_data() {
     let (_dir, path) = temp_db_path();
     let id = Uuid::new_v4();
+    // How many migrations the embedded set records on first open; captured so the
+    // reopen no-op assertion tracks the set rather than a hard-coded count.
+    let baseline_migrations: i64;
 
     // First open applies the migration; write some data, then close.
     {
@@ -633,11 +636,14 @@ async fn migrations_are_idempotent_and_preserve_data() {
         .await
         .unwrap();
 
-        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        baseline_migrations = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(applied, 1, "exactly one migration recorded");
+        assert!(
+            baseline_migrations >= 1,
+            "the embedded migration set must have been applied"
+        );
         db.close().await;
     }
 
@@ -649,7 +655,10 @@ async fn migrations_are_idempotent_and_preserve_data() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(applied, 1, "no extra migration applied on reopen");
+        assert_eq!(
+            applied, baseline_migrations,
+            "no extra migration applied on reopen"
+        );
 
         // Schema is present and the data is intact.
         let stored = db.get_session(id).await.unwrap().unwrap();

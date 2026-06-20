@@ -23,7 +23,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::config::{Config, UserAgentRotation};
 use crate::error::{Error, Result};
 use crate::rate_limit::RateLimiter;
 
@@ -183,6 +183,19 @@ impl Orchestrator {
 
         let fanout = self.build_fanout(progress);
 
+        // Resolve the User-Agent source for this session from the configured
+        // rotation granularity. Per-request rotation uses the shared source
+        // directly (a fresh draw on every request); per-scan rotation draws once
+        // here and pins that identity for the whole session. Pinning works for any
+        // source — a rotating pool yields one realistic identity, a single source
+        // yields its fixed one.
+        let session_ua: Arc<dyn UserAgentSource> = match self.config.scanning.user_agent_rotation {
+            UserAgentRotation::PerRequest => self.ua_source.clone(),
+            UserAgentRotation::PerScan => {
+                Arc::new(SingleUserAgent::new(self.ua_source.next_user_agent()))
+            }
+        };
+
         let mut ran_any = false;
         let mut cancelled = cancel.is_cancelled();
 
@@ -206,7 +219,7 @@ impl Orchestrator {
                     break 'outer;
                 }
 
-                let ctx = self.context_for(&cancel, &fanout);
+                let ctx = self.context_for(&cancel, &fanout, &session_ua);
 
                 // Race the scan against cancellation: a long-awaiting scan unwinds
                 // promptly when the token fires (the scan future is dropped).
@@ -285,13 +298,18 @@ impl Orchestrator {
     }
 
     /// Build the scan context for one unit, wired to the cancellation token, the
-    /// shared limiter and HTTP client, the User-Agent source, the fan-out progress
-    /// callback, and any configured credential.
-    fn context_for(&self, cancel: &CancellationToken, fanout: &ProgressCallback) -> ScanContext {
+    /// shared limiter and HTTP client, the session's User-Agent source, the fan-out
+    /// progress callback, and any configured credential.
+    fn context_for(
+        &self,
+        cancel: &CancellationToken,
+        fanout: &ProgressCallback,
+        ua_source: &Arc<dyn UserAgentSource>,
+    ) -> ScanContext {
         let ctx = ScanContext::new(
             self.config.clone(),
             self.rate_limiter.clone(),
-            self.ua_source.clone(),
+            ua_source.clone(),
             cancel.clone(),
         )
         .with_http_client(self.http.clone())
