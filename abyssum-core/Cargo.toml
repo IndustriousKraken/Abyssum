@@ -28,6 +28,9 @@ url = { workspace = true }
 chrono = { workspace = true }
 # Fresh uniform draw for each paced request's base delay.
 rand = { workspace = true }
+# Durable result storage: scan sessions and findings in an embedded SQLite file,
+# accessed async through the shared Tokio runtime. Migrations are embedded.
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -37,3 +40,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # The orchestration integration tests implement a stub `BaseScanner`.
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+# The persistence integration tests construct sessions/findings (uuids, fixed
+# timestamps) and probe the migration tracking table directly.
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }

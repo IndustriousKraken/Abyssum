@@ -14,11 +14,16 @@
 pub mod config;
 pub mod error;
 pub mod logging;
+pub mod persistence;
 pub mod rate_limit;
 pub mod scan;
 
 pub use config::Config;
 pub use error::{Error, Result};
+pub use persistence::{
+    DatabaseManager, FindingFilter, SessionRecord, SessionWithFindings, StoredFinding,
+    StoredSession, SummaryCounts,
+};
 pub use rate_limit::{Pace, RateLimiter};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Method, Orchestrator,

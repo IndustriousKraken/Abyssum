@@ -45,6 +45,13 @@ pub enum Error {
     #[error("scan cancelled")]
     Cancelled,
 
+    /// A persistence (durable storage) operation failed: opening the store,
+    /// applying a migration, or executing a query. The wrapped message carries
+    /// the underlying driver detail. See the `persistence` module, whose
+    /// `From` impls map `sqlx` failures into this variant.
+    #[error("persistence error: {0}")]
+    Persistence(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

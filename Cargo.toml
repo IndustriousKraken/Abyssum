@@ -45,6 +45,17 @@ url = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Structured finding evidence.
 serde_json = "1"
+# Persistence: async SQLite via sqlx. SQLite is bundled (no system libsqlite3);
+# no TLS backend is pulled in — the embedded file store never opens a socket.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "migrate",
+    # `macros` provides the compile-time `migrate!` that embeds the SQL files;
+    # it does not require a build-time database (unlike `query!`).
+    "macros",
+] }
 # Randomness — the per-request uniform delay draw must be a fresh sample each time
 # (fixed / patterned timing is a fingerprinting vector; see rate-limiting design).
 rand = "0.8"
