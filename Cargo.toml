@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "abyssum-core",
+    "abyssum-scanners",
+    "abyssum-web",
+    "abyssum-cli",
+]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IndustriousKraken/Abyssum"
+authors = ["Abyssum contributors"]
+
+[workspace.dependencies]
+# Internal crates
+abyssum-core = { path = "abyssum-core" }
+abyssum-scanners = { path = "abyssum-scanners" }
+
+# Shared third-party dependencies (see openspec/changes/a00 design.md for the locked stack).
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4", features = ["derive", "env"] }
+# Async runtime — declared centrally for the surfaces that need it as they grow
+# (orchestration/server land in later changes). Members opt in via `workspace = true`.
+tokio = { version = "1", features = ["full"] }
+
+# Dev-only helpers
+tempfile = "3"
