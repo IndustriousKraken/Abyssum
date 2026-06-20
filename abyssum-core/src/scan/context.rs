@@ -64,7 +64,12 @@ impl UserAgentSource for SingleUserAgent {
 
 /// An optional credential attached to outbound requests: a bearer token and/or a
 /// cookie. CORS attaches one; BAC/IDOR can run with it stripped to compare.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is implemented by hand to **redact** the secret values: it reports
+/// only whether a bearer/cookie is present, never the value itself. This keeps a
+/// stray `tracing::debug!(credential = ?cred)` or a `#[derive(Debug)]` on a
+/// future containing type from leaking secrets into logs.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     /// Bearer token sent as `Authorization: Bearer <token>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +77,18 @@ pub struct Credential {
     /// Raw `Cookie:` header value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie: Option<String>,
+}
+
+impl std::fmt::Debug for Credential {
+    /// Redact the secret values, preserving only their presence/absence so a
+    /// debug print stays diagnostically useful without exposing the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |value: &Option<String>| value.as_ref().map(|_| "***");
+        f.debug_struct("Credential")
+            .field("bearer", &redact(&self.bearer))
+            .field("cookie", &redact(&self.cookie))
+            .finish()
+    }
 }
 
 impl Credential {
@@ -319,6 +336,24 @@ mod tests {
     fn credential_constructors() {
         assert_eq!(Credential::bearer("t").bearer.as_deref(), Some("t"));
         assert_eq!(Credential::cookie("c").cookie.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn credential_debug_redacts_secret_values() {
+        let cred = Credential {
+            bearer: Some("super-secret-token".into()),
+            cookie: Some("session=hunter2".into()),
+        };
+        let rendered = format!("{cred:?}");
+        // The secret values must never appear in a debug print.
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        // Presence is still reported (redacted), absence stays None.
+        assert!(rendered.contains("***"), "{rendered}");
+        assert_eq!(
+            format!("{:?}", Credential::default()),
+            "Credential { bearer: None, cookie: None }"
+        );
     }
 
     #[tokio::test]

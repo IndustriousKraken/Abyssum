@@ -250,7 +250,9 @@ impl RateLimiter {
         let min = self.inner.min_delay.as_secs_f64();
         let max = self.inner.max_delay.as_secs_f64();
         let secs = if max > min {
-            rand::thread_rng().gen_range(min..max)
+            // Inclusive of `max` to match the design's stated uniform `[min, max]`
+            // band (a half-open `[min, max)` draw can never sample the ceiling).
+            rand::thread_rng().gen_range(min..=max)
         } else {
             // Degenerate band (min == max): the base is exactly the floor.
             min
