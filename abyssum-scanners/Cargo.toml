@@ -1,6 +1,6 @@
 [package]
 name = "abyssum-scanners"
-description = "Abyssum scanner implementations (populated in later changes)."
+description = "Abyssum scanner implementations (REST discovery and, in later changes, the rest)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,24 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+abyssum-core = { workspace = true }
+# Object-safe async traits: the `BaseScanner` impl and the `WordlistProvider` seam.
+async-trait = { workspace = true }
+# Response inspection: the scanner reads the `reqwest::Response` returned by
+# `ScanContext::send` (status, content-type, body) but never holds a client.
+reqwest = { workspace = true }
+# Structured finding evidence and the "API-shaped body" JSON probe.
+serde_json = { workspace = true }
+# Candidate URL construction from a target's origin.
+url = { workspace = true }
+# A random, unlikely path for the soft-404 baseline probe.
+uuid = { workspace = true }
+
+[dev-dependencies]
+# `#[tokio::test]` plus a hand-rolled loopback mock server (net/io) and the
+# paced-request timing assertions (time).
+tokio = { workspace = true }
+# The cancellation token threaded into a hand-built `ScanContext` for tests.
+tokio-util = { workspace = true }
+# A real on-disk SQLite file for the end-to-end seed-store wordlist test.
+tempfile = { workspace = true }
