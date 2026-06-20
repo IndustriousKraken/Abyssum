@@ -25,6 +25,26 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A scan selected a scanner id that is not present in the registry. Raised
+    /// before any request is issued, so an unknown id never reaches a target.
+    #[error("scanner not found: {0}")]
+    ScannerNotFound(String),
+
+    /// A scan target could not be constructed or resolved (e.g. an unparseable
+    /// base URL, or a URL with no host to pace on).
+    #[error("invalid target: {0}")]
+    Target(String),
+
+    /// An outbound HTTP request issued through the scan context failed at the
+    /// transport layer (connection, TLS, timeout, …) or was halted by pacing.
+    #[error("request error: {0}")]
+    Http(String),
+
+    /// The scan was cancelled. Surfaced by the scan context's cancellation check
+    /// so a cooperating scanner can unwind promptly and return partial results.
+    #[error("scan cancelled")]
+    Cancelled,
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

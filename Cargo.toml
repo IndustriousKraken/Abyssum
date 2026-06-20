@@ -29,6 +29,22 @@ clap = { version = "4", features = ["derive", "env"] }
 # Async runtime — declared centrally for the surfaces that need it as they grow
 # (orchestration/server land in later changes). Members opt in via `workspace = true`.
 tokio = { version = "1", features = ["full"] }
+# Cancellation primitive for scan sessions — the orchestrator holds the source and
+# hands a child token to every scan context (see add-scan-orchestration design).
+tokio-util = "0.7"
+# Object-safe async trait for the `BaseScanner` contract.
+async-trait = "0.1"
+# HTTP client — owned by the engine and reached only through `ScanContext::send`,
+# so the pacing floor can never be bypassed. rustls (no system OpenSSL dependency).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Stable session identifiers.
+uuid = { version = "1", features = ["v4", "serde"] }
+# Target URLs — origin + path modelling and per-domain host derivation.
+url = { version = "2", features = ["serde"] }
+# Finding timestamps.
+chrono = { version = "0.4", features = ["serde"] }
+# Structured finding evidence.
+serde_json = "1"
 # Randomness — the per-request uniform delay draw must be a fresh sample each time
 # (fixed / patterned timing is a fingerprinting vector; see rate-limiting design).
 rand = "0.8"
