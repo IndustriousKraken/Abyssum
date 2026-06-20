@@ -1,0 +1,17 @@
+[package]
+name = "abyssum-web"
+description = "Abyssum web surface (axum server arrives in a later change)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "abyssum-web"
+path = "src/main.rs"
+
+[dependencies]
+abyssum-core = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }

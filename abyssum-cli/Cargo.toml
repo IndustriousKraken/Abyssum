@@ -1,0 +1,17 @@
+[package]
+name = "abyssum-cli"
+description = "Abyssum command-line surface (scanner subcommands arrive in later changes)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "abyssum"
+path = "src/main.rs"
+
+[dependencies]
+abyssum-core = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
