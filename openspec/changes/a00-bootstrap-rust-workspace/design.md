@@ -37,6 +37,14 @@ Deterministic and testable. Missing file is not an error (defaults apply); a mal
 ### Decision: No `pyo3`
 The v1 experimental branch's Python bridge is discarded entirely (see `project.md`).
 
+### Decision: The `Error` enum is designed to grow
+The core `Error` enum starts with `Config`, `Io`, and a catch-all, but it is **not** a
+closed set. Later changes add their own variants (e.g. `add-scan-orchestration` adds
+`ScannerNotFound`; persistence and auth add storage/auth variants). Mark the enum
+`#[non_exhaustive]` so downstream matches must include a wildcard arm and adding a variant is
+never a breaking change. The autocoder should treat this enum as an extension point that
+later changes append to, not as a finished list.
+
 ## Config Shape (initial)
 
 ```yaml

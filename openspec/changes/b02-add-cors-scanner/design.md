@@ -3,25 +3,24 @@
 ## Technical Approach
 
 Implement `CorsScanner` in `abyssum-scanners`, implementing the `BaseScanner` trait from
-`abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a `ScanContext`
-providing the HTTP client, the rate limiter, a progress callback, and a cancellation signal
-— it owns none of those concerns itself. If the scan context carries an authorization token
-(bearer/cookie), the scanner attaches it to each probe so credentialed responses are
-exercised.
+`abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a `ScanContext`
+with a progress callback, a cancellation signal, and a single paced `send()` — **no raw HTTP
+client** — so it owns none of those concerns and cannot bypass pacing. When the context
+carries a credential (bearer/cookie), the scanner includes it on each probe (via the
+`RequestSpec`) so credentialed responses are exercised.
 
 ```
 for each crafted origin in test_origins:
-    check cancellation
-    await rate_limiter.acquire(domain)        # enforces the user's pacing floor
-    response = http.get(target_url, header Origin = crafted_origin [+ auth])
+    ctx.check_cancellation()
+    response = ctx.send(GET, target_url, header Origin = crafted_origin [+ context credential])
     acao = response.header("Access-Control-Allow-Origin")
     acac = response.header("Access-Control-Allow-Credentials")  # case-insensitive "true"
     classify(crafted_origin, acao, acac) -> Finding | none
-    progress(tested, total, current_origin)
+    ctx.report_progress(tested, total, current_origin)
 ```
 
-A response with no ACAO header is never a finding. Probing is sequential per target and
-flows through the rate limiter, so it can never exceed the configured per-domain floor.
+A response with no ACAO header is never a finding. Each probe goes through `ctx.send`, which
+paces per-domain, so it can never exceed the configured per-domain floor.
 
 ## Crafted Origins (mined from v1 `scanners/cors.py`)
 

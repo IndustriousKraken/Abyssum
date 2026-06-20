@@ -9,7 +9,7 @@
 - [ ] 2.2 Add a migration for the `user_agents(value, category, realistic)` table
 
 ## 3. Idempotent seeding
-- [ ] 3.1 On startup, detect an empty/stale store and seed it from the embedded assets
+- [ ] 3.1 On startup, seed the store from the embedded assets, topping up any missing rows (no content-hash or version check)
 - [ ] 3.2 Make seeding idempotent (key by list name + value, and by UA value); re-seeding inserts only missing rows
 - [ ] 3.3 Provide an explicit seed entry point the installer/CLI can invoke
 

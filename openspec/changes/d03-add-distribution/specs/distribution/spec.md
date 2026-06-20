@@ -60,6 +60,14 @@ one is not specified.
 - **WHEN** the installer runs
 - **THEN** it SHALL resolve the most recent published release version and install that
 
+#### Scenario: Asset names are built from the resolved tag verbatim
+- **GIVEN** a resolved release tag string (for example one carrying a leading `v`)
+- **WHEN** the installer reconstructs the names of the assets to download
+- **THEN** it SHALL use the resolved tag string verbatim, neither stripping nor adding a
+  leading `v`
+- **AND** the reconstructed names SHALL match the published asset names exactly, because the
+  release process names its assets from the same tag string verbatim
+
 #### Scenario: Unsupported host fails clearly
 - **GIVEN** a host whose operating system or architecture has no published binary
 - **WHEN** the installer runs
@@ -91,3 +99,25 @@ verification.
 - **THEN** it SHALL install into a system-wide PATH directory
 - **AND** **WHEN** run without privilege or in user mode it SHALL install into a
   per-user PATH directory instead
+
+#### Scenario: Warns when the install directory is not on PATH
+- **GIVEN** an install completes into a directory that is not present in the user's PATH
+- **WHEN** the installer finishes
+- **THEN** it SHALL emit a warning that the install directory is not on PATH
+- **AND** the warning SHALL NOT cause the installation to fail
+
+### Requirement: Delivery Machinery Is Linted Before Publishing
+
+The release pipeline SHALL lint its own release workflow and the installer script as part of
+the pipeline, before any release is published, so a broken workflow or installer is caught
+in CI rather than at release time.
+
+#### Scenario: Release workflow is linted
+- **WHEN** the release pipeline runs
+- **THEN** it SHALL lint the release workflow definition with a workflow linter
+- **AND** a lint failure SHALL stop the pipeline before any binary is published
+
+#### Scenario: Installer script is linted
+- **WHEN** the release pipeline runs
+- **THEN** it SHALL lint the installer script with a shell linter
+- **AND** a lint failure SHALL stop the pipeline before any binary is published

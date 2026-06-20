@@ -3,24 +3,23 @@
 ## Technical Approach
 
 Implement `BacScanner` in `abyssum-scanners`, implementing the `BaseScanner` trait from
-`abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a `ScanContext`
-providing the HTTP client, the rate limiter, a progress callback, and a cancellation signal
-— it owns none of those concerns itself.
+`abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a `ScanContext`
+with a progress callback, a cancellation signal, and a single paced `send()` — **no raw HTTP
+client** — so it owns none of those concerns and cannot bypass pacing.
 
 ```
-baseline = probe(base_url)                     # establish reachability baseline
+baseline = ctx.send(GET, base_url, credentials-omitted)   # reachability baseline
 for each sensitive path in wordlist:
-    check cancellation
-    await rate_limiter.acquire(domain)         # enforces the user's pacing floor
-    response = http.get(base_url + path, auth-stripped)
+    ctx.check_cancellation()
+    response = ctx.send(GET, base_url+path, credentials-omitted)   # paced + UA-stamped; the only way out
     evaluate(response, path) -> Finding | none
-    progress(tested, total, current_path)
+    ctx.report_progress(tested, total, current_path)
 ```
 
-Every probe is sent with authorization credentials removed from the request (no bearer
-token, no auth header) so a positive result means the endpoint is reachable *without*
-authentication. Redirects are not auto-followed by the client; a redirect to a sensitive
-location triggers one explicit follow-up probe (which also counts against the rate limiter).
+Each probe is a `RequestSpec` that **explicitly omits the context credential** (no bearer
+token, no auth header/cookie) so a positive result means the endpoint is reachable *without*
+authentication; `ctx.send` still paces it and stamps a UA. Redirects are not auto-followed; a
+redirect to a sensitive location triggers one explicit follow-up `send` (which also paces).
 
 ## Library / Data Choices
 
@@ -57,6 +56,16 @@ endpoint reachable without obvious data → medium. The observable contract is t
 The error-page suppression (recognized not-found phrasing, default server error pages, very
 short HTML bodies) is the false-positive guard from v1; the *observable* contract is "a
 recognized error/not-found page on a sensitive path is not reported as unauthorized access".
+
+**Default sensitive-content signal set (overridable).** A 2xx body counts as sensitive when
+any holds: (a) `Content-Type` is JSON and the body is a collection of at least a threshold
+(default **5**) records/objects; (b) the body contains any default keyword, case-insensitive —
+`password`, `passwd`, `secret`, `token`, `api_key`/`apikey`, `authorization`, `ssn`,
+`credit_card`, `private_key`, `BEGIN RSA`, `db_password`, or many email addresses; or (c) a
+recognizable admin-interface marker (e.g. an admin/dashboard page title). The not-found/error
+guard discards a 2xx body matching common not-found phrasing or a default server-error page,
+or shorter than a small byte threshold (default **512 bytes** of HTML). These defaults make
+the severity scenarios deterministic; an implementation may tune the lists.
 
 ### Canonical finding mapping
 

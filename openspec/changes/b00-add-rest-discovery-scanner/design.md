@@ -3,21 +3,20 @@
 ## Technical Approach
 
 Implement `RestDiscoveryScanner` in `abyssum-scanners`, implementing the `BaseScanner`
-trait from `abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a
-`ScanContext` providing the HTTP client, the rate limiter, a progress callback, and a
-cancellation signal — it owns none of those concerns itself.
+trait from `abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a
+`ScanContext` with a progress callback, a cancellation signal, and a single paced `send()` —
+**no raw HTTP client** — so it owns none of those concerns and cannot bypass pacing.
 
 ```
 for each candidate path in wordlist:
-    check cancellation
-    await rate_limiter.acquire(domain)     # enforces the user's pacing floor
-    response = http.get(base_url + path)
+    ctx.check_cancellation()
+    response = ctx.send(GET, target.full_url_for(path))   # paces + stamps a rotating UA; the only way out
     classify(response) -> Finding | none
-    progress(tested, total, current_path)
+    ctx.report_progress(tested, total, current_path)
 ```
 
-Concurrency is bounded and flows through the rate limiter, so "concurrent" never means
-"faster than the configured floor per domain".
+Every request goes through `ctx.send`, which paces per-domain through the shared limiter, so
+"concurrent" never means "faster than the configured floor per domain".
 
 ## Library / Data Choices
 
@@ -26,7 +25,8 @@ Concurrency is bounded and flows through the rate limiter, so "concurrent" never
   `rest_endpoints` and `rest_api_bases` — each by name, shipped in
   `assets/seed/wordlists/` (`endpoints.txt`, `api_bases.txt`) and seeded into the database
   on first run. No user-uploaded wordlists in v1 (see `project.md` non-goals).
-- **HTTP:** `reqwest` client supplied by `ScanContext`.
+- **HTTP:** issued through `ScanContext::send` (paced, UA-stamped); no raw client is exposed
+  to the scanner.
 
 ## Classification Rules (informs the spec's behavior, kept testable)
 
@@ -36,9 +36,14 @@ Concurrency is bounded and flows through the rate limiter, so "concurrent" never
 | 404 / generic not-found | absent |
 | 5xx | present-but-erroring (reported, low confidence) |
 
-Classification must tolerate soft-404s (200 with a not-found body) — see scenario in the
-spec. The exact heuristic is implementation detail; the *observable* contract is "a soft-404
-is not reported as a finding".
+Classification must tolerate soft-404s (200 with a not-found body). **Default heuristic
+(overridable):** before probing the wordlist, send one request to a random unlikely path
+(e.g. `/<random-uuid>`) and record that response's status and a body fingerprint (length
+bucket + a hash of the whitespace-normalized body). A candidate is classified *absent* when
+its response matches that fingerprint — same status and either an equal normalized-body hash
+or a body length within a small tolerance. "API-shaped content" = a JSON/XML `Content-Type`
+or a body that parses as JSON. The *observable* contract remains "a soft-404 is not reported
+as a finding"; the fingerprint is the concrete default that makes it deterministic.
 
 ### Canonical finding mapping
 

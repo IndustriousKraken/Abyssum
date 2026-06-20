@@ -55,9 +55,10 @@ CREATE TABLE user_agents (
 
 ## Seeding
 
-- On startup, if the store is empty (or a content hash differs), populate from the embedded
-  assets. Idempotent: keyed by natural identity (list name + value; UA value), so re-seeding
-  inserts only what's missing.
+- On startup, populate from the embedded assets. Seeding is idempotent, keyed by natural
+  identity (list name + value; UA value), so it always tops up only the missing rows — there
+  is no content-hash check or version stamp. Running it against a fully populated store is a
+  no-op; running it against a partially populated one inserts exactly what is absent.
 - Optionally exposed as an explicit `abyssum init`/`--seed` path for installers, but first-run
   self-seeding is the primary mechanism so it works regardless of install method.
 

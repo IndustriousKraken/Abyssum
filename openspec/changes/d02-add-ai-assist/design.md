@@ -38,6 +38,8 @@ ai:
   timeout_seconds: 30                    # best-effort cutoff
   enabled: true                          # off => analyze requests return a clear "disabled" notice
   max_evidence_chars: 4000               # evidence is truncated to this before sending
+  temperature: 0.2                       # low => stable, repeatable analysis
+  max_tokens: null                       # optional cap on the response length
 ```
 
 Env overrides follow the established prefix, e.g. `ABYSSUM_AI__API_KEY`,
@@ -87,6 +89,15 @@ model knows the evidence was clipped.
 `analyze_finding` is reachable from the web finding-detail view via an "Analyze with AI"
 action (and an equivalent CLI path), so the on-demand request the scenarios describe has a
 concrete trigger. The surface treats a non-fatal `Err` as a displayed notice, never a failure.
+
+### Decision: Request parameters and response robustness
+The chat request is **non-streaming** (`stream: false`) — the analysis is shown as one block,
+which keeps response handling simple and the best-effort error mapping total. `temperature`
+defaults low (**0.2**) for stable, repeatable analysis rather than creative variation;
+`temperature` and `max_tokens` are optional config keys with conservative defaults. Response
+parsing reads `choices[0].message.content`; a response missing `choices`, an empty array, or a
+`null`/absent `content` is treated as a malformed response → a clear non-fatal error (the same
+path as a 500 or a transport failure), never a panic.
 
 ## Testing
 

@@ -75,6 +75,15 @@ Assets are named `<binary>-<version>-<triple>` (e.g.
 reconstructs these names from detected host facts and the resolved version, so no manifest
 or index file is required.
 
+### Decision: The resolved tag is used verbatim on both sides (v-prefix pinning)
+The `<version>` segment of every asset name is the release tag string used **verbatim**,
+including any leading `v` (e.g. `v2.0.0`). The release job derives its published asset
+names from the pushed tag (`github.ref_name`), and the installer derives its reconstructed
+names from the `tag_name` returned by the GitHub latest-release API — the *same* string. By
+never stripping, normalizing, or re-adding the `v`, the two sides are guaranteed to produce
+identical names, so a download URL the installer builds always matches a published asset.
+This closes the silent-breakage gap where one side carries the `v` and the other does not.
+
 ### Decision: Default vs. user install location
 Root (or sudo-capable) installs land in `/usr/local/bin`; unprivileged or `--user` installs
 land in `~/.local/bin`. Either way the binaries end up on a conventional PATH directory.

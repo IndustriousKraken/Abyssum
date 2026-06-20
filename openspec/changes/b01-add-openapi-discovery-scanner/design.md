@@ -3,19 +3,18 @@
 ## Technical Approach
 
 Implement `OpenApiDiscoveryScanner` in `abyssum-scanners`, implementing the `BaseScanner`
-trait from `abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a
-`ScanContext` providing the HTTP client, the rate limiter, a progress callback, and a
-cancellation signal — it owns none of those concerns itself.
+trait from `abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a
+`ScanContext` with a progress callback, a cancellation signal, and a single paced `send()` —
+**no raw HTTP client** — so it owns none of those concerns and cannot bypass pacing.
 
 ```
 for each candidate spec path:
-    check cancellation
-    await rate_limiter.acquire(domain)     # enforces the user's pacing floor
-    response = http.get(base_url + path)
+    ctx.check_cancellation()
+    response = ctx.send(GET, target.full_url_for(path))   # paces + stamps a rotating UA
     if response is a valid OpenAPI/Swagger document:
         endpoints = extract documented paths
         record spec + endpoints
-    progress(tested, total, current_path)
+    ctx.report_progress(tested, total, current_path)
 emit one finding summarizing every discovered spec and its endpoints
 ```
 
@@ -31,7 +30,7 @@ plumbing.
   covers the well-known locations (`/openapi.json`, `/swagger.json`, `/openapi.yaml`,
   `/swagger.yaml`, `/api-docs`, `/api/docs`, …). No user-uploaded wordlists in v1 (see
   `project.md` non-goals).
-- **HTTP:** `reqwest` client supplied by `ScanContext`.
+- **HTTP:** issued through `ScanContext::send` (paced, UA-stamped); no raw client is exposed.
 - **Parsing:** `serde_json` for JSON specs and `serde_yaml` for YAML specs, both decoded
   into a generic JSON value so validation/extraction is format-agnostic. Format is chosen
   from the response `content-type` and the path extension, with the other format tried as a

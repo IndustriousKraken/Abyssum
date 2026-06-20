@@ -3,36 +3,35 @@
 ## Technical Approach
 
 Implement `IdorScanner` in `abyssum-scanners`, implementing the `BaseScanner` trait from
-`abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a `ScanContext`
-providing the HTTP client, the rate limiter, a progress callback, and a cancellation
-signal — it owns none of those concerns itself.
+`abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a `ScanContext`
+with a progress callback, a cancellation signal, and a single paced `send()` — **no raw HTTP
+client** — so it owns none of those concerns and cannot bypass pacing.
 
-The scan has three phases, all driven through the scan engine:
+The scan has three phases, all driven through `ctx.send`:
 
 ```
-1. seed: probe a few likely "self" endpoints (e.g. /api/users, /api/me) and harvest
+1. seed: ctx.send a few likely "self" endpoints (e.g. /api/users, /api/me) and harvest
    real identifiers from the bodies -> baseline references per id-shape.
    If none are harvested, fall back to a default numeric baseline ("1").
 
-2. path enumeration: for each (endpoint pattern, baseline reference):
-     baseline = GET pattern.replace(id, baseline_ref)   # captures baseline body+status
+2. path enumeration: for each (id_template, baseline reference):
+     baseline = ctx.send(GET, id_template.replace(id, baseline_ref))   # baseline body+status
      for each alt_ref in neighbours(baseline_ref, shape):
-         check cancellation
-         await rate_limiter.acquire(domain)             # enforces the pacing floor
-         resp = GET pattern.replace(id, alt_ref)        # WITHOUT the Authorization header
+         ctx.check_cancellation()
+         resp = ctx.send(GET, id_template.replace(id, alt_ref), credentials-omitted)
          if confirmed_idor(baseline, resp): emit Finding
-         progress(tested, total, current)
+         ctx.report_progress(tested, total, current)
 
 3. parameter enumeration: for each (param endpoint, param name):
-     baseline = GET endpoint?param=1
-     resp     = GET endpoint?param=2
+     baseline = ctx.send(GET, endpoint?param=1)
+     resp     = ctx.send(GET, endpoint?param=2, credentials-omitted)
      if confirmed_idor(baseline, resp): emit Finding
 ```
 
-Requests in the enumeration phases are issued with the `Authorization` header stripped, so
-a success proves the object is reachable without the caller's credentials — the essence of
-an IDOR. Concurrency (if any) flows through the rate limiter, so it never means "faster
-than the configured floor per domain".
+Enumeration probes are `RequestSpec`s that **omit the context credential**, so a success
+proves the object is reachable without the caller's credentials — the essence of an IDOR.
+`ctx.send` still paces each one per-domain, so it never means "faster than the configured
+floor per domain".
 
 ## Identifier shapes and neighbour generation
 
@@ -55,9 +54,11 @@ observable contract is "probe references *other than* the baseline of the same s
 - `resp` body differs materially from the baseline body (so an identical echo of the same
   object, or a generic shell page served for every id, is not reported).
 
-Body difference uses a length-then-structural comparison (JSON-aware when both parse as
-JSON, byte comparison otherwise). The exact comparator is implementation detail; the
-contract is "a response identical to the baseline is not an IDOR".
+Body difference uses a length-then-structural comparison. **Default comparator (overridable):**
+two bodies "differ materially" when their whitespace-normalized lengths differ by more than a
+small tolerance (default **5%**) OR, when both parse as JSON, their sets of scalar leaf values
+differ; a body equal to the baseline, or equal to the not-found/error response, counts as
+"no difference". The contract is "a response identical to the baseline is not an IDOR".
 
 ## Severity and sensitive-field detection
 
@@ -68,7 +69,10 @@ Scan the confirmed body for sensitive field names / value patterns:
 - **Medium:** user-shaped data without PII.
 - **Low:** otherwise.
 
-The finding's overall severity is the highest among its confirmed references.
+Each confirmed IDOR is its own `Finding` with its own `severity` from the canonical set; when
+one finding aggregates several confirmed references, its severity is the highest among them.
+There is **no scan-level severity field** — any "overall" figure a surface shows is a
+presentation rollup (the max severity across the session's findings), not a stored value.
 
 ### Canonical finding mapping
 
@@ -106,7 +110,7 @@ consistent with the tested/total contract.
 
 ## Library / Data Choices
 
-- **HTTP:** `reqwest` client supplied by `ScanContext`.
+- **HTTP:** issued through `ScanContext::send` (paced, UA-stamped); no raw client is exposed.
 - **Pattern / parameter heuristics:** small inline detection lists (object-reference
   parameter names, id-shape patterns) kept in code as heuristics — these are detection logic,
   not the curated, DB-seeded wordlists used by the discovery scanners. No user-uploaded

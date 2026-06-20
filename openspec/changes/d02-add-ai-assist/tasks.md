@@ -1,7 +1,7 @@
 # Tasks
 
 ## 1. AI provider configuration
-- [ ] 1.1 Add an `ai` config section (`base_url`, `model`, `api_key` optional, `timeout_seconds`, `enabled`) deserialized into the existing layered config
+- [ ] 1.1 Add an `ai` config section (`base_url`, `model`, `api_key` optional, `timeout_seconds`, `enabled`, `max_evidence_chars`, `temperature`, `max_tokens` optional) deserialized into the existing layered config
 - [ ] 1.2 Make `api_key` nullable/empty-friendly and overridable from `ABYSSUM_AI__*` env vars
 - [ ] 1.3 Unit-test the config: defaults, file overlay, env override, and the null/empty key case
 
@@ -11,10 +11,10 @@
 - [ ] 2.3 Truncate evidence to `ai.max_evidence_chars` (default 4000) before sending and mark it as truncated in the prompt
 
 ## 3. Outbound OpenAI-compatible call
-- [ ] 3.1 POST a chat-completions request to `{base_url}/chat/completions` with the configured model
+- [ ] 3.1 POST a non-streaming (`stream: false`) chat-completions request to `{base_url}/chat/completions` with the configured model, `temperature`, and optional `max_tokens`
 - [ ] 3.2 Attach a bearer credential ONLY when a key is configured; send NO authorization header when the key is absent/empty
 - [ ] 3.3 Apply the configured request timeout
-- [ ] 3.4 Parse the assistant message text from a successful response
+- [ ] 3.4 Parse the assistant text from `choices[0].message.content`; treat missing/empty `choices` or a null/absent `content` as a malformed-response error, not a panic
 
 ## 4. Best-effort error handling
 - [ ] 4.1 Map network failure, non-2xx provider responses, malformed bodies, and timeout to distinct clear error messages

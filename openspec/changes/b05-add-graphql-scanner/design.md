@@ -3,20 +3,19 @@
 ## Technical Approach
 
 Implement `GraphqlScanner` in `abyssum-scanners`, implementing the `BaseScanner` trait from
-`abyssum-core` (defined in `add-scan-orchestration`). The scanner receives a `ScanContext`
-providing the HTTP client, the rate limiter, a progress callback, and a cancellation signal —
-it owns none of those concerns itself.
+`abyssum-core` (defined in `add-scan-orchestration`). The scanner is given a `ScanContext`
+with a progress callback, a cancellation signal, and a single paced `send()` — **no raw HTTP
+client** — so it owns none of those concerns and cannot bypass pacing.
 
 The scan runs in two phases:
 
 ```
 # Phase 1: detect a GraphQL endpoint
 for each candidate path in graphql_paths:
-    check cancellation
-    await rate_limiter.acquire(domain)
-    response = probe(base_url + path)        # GET, then POST { __typename }
+    ctx.check_cancellation()
+    response = probe(base_url + path)        # ctx.send GET, then ctx.send POST { __typename }
     if looks_like_graphql(response): record candidate; stop at the first hit
-    progress(tested, total, current_path)
+    ctx.report_progress(tested, total, current_path)
 
 # Phase 2: probe the first detected endpoint
 if a GraphQL endpoint was found:
@@ -27,9 +26,9 @@ if a GraphQL endpoint was found:
         disclosure_check(endpoint, q)
 ```
 
-Each phase request goes through the rate limiter, so "two phases" never means "faster than
-the configured floor per domain". If no endpoint is detected, the scan completes with no
-findings.
+Every request goes through `ctx.send`, which paces per-domain, so "two phases" never means
+"faster than the configured floor per domain". If no endpoint is detected, the scan completes
+with no findings.
 
 ## Library / Data Choices
 
@@ -42,8 +41,8 @@ findings.
   and are seeded into the database on first run; default paths mirror the v1 fallback
   (`/graphql`, `/api/graphql`, `/v1/graphql`, `/graph`, `/query`). No user-uploaded wordlists
   in v1 (see `project.md` non-goals).
-- **HTTP:** `reqwest` client supplied by `ScanContext`; POST bodies are JSON
-  (`{"query": "..."}`), with `Content-Type: application/json`.
+- **HTTP:** issued through `ScanContext::send` (paced, UA-stamped); no raw client is exposed.
+  POST bodies are JSON (`{"query": "..."}`), with `Content-Type: application/json`.
 - **JSON:** `serde_json` to build queries and walk introspection / response payloads.
 
 ## Detection & Check Rules (informs the spec's behavior, kept testable)
@@ -82,7 +81,10 @@ introspection is **enabled** → a finding. Schema evidence extracted from `__sc
 
 ### Severity
 
-Per-finding severity, then an overall level = the highest among findings:
+Each check that fires is its own `Finding` with its own `severity` from the canonical set.
+There is **no scan-level severity field** — any "overall" level a surface shows is a
+presentation rollup (the max severity across the session's findings), not a stored value.
+Per-finding severity:
 
 - introspection enabled → high
 - disclosure of `password`/`token`/`secret`, or an admin query → critical

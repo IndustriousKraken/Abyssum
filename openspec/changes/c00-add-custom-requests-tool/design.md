@@ -11,8 +11,8 @@ and returns one result value that both surfaces format.
 build request spec (url, method, headers, optional body, optional auth)
   -> add Authorization: Bearer header if a token is present
   -> add Cookie header if a cookie string is present
-send via reqwest (TLS verification may be relaxed for testing targets)
-capture status, response headers, body, elapsed time, redirect chain
+send via reqwest (TLS verification ON by default; disabled only by --insecure)
+capture status, response headers, final URL/status, redirect hop count, body, elapsed time
 analyze(response) -> Vec<Signal>          # pure function, no I/O
 return RequestOutcome { request echo, response, signals }
 ```
@@ -30,7 +30,8 @@ keeps keyless endpoints first-class (canon).
 - **Timing:** `std::time::Instant` for round-trip elapsed time.
 - **CLI argument shape (wired in c01):** mirrors the v1 flags — `-X/--method`,
   `-H/--header` (repeatable), `-A/--auth` (bearer), `-c/--cookie`, `-d/--data`,
-  `--content-type`, `--no-follow-redirects`, `--timeout`, `--output pretty|json`.
+  `--content-type`, `--no-follow-redirects`, `--insecure` (a.k.a. `--no-verify-tls`),
+  `--timeout`, `--output pretty|json`.
 
 ## Architecture Decisions
 
@@ -55,6 +56,27 @@ low-severity hints separate from scanner findings.
 When a body is supplied without an explicit content type and parses as JSON, default the
 content type to JSON (matching v1 convenience); otherwise send the body verbatim. This is a
 convenience default, not a behavior the spec mandates beyond "a body is sent as provided".
+
+### Decision: TLS verification is ON by default, opt-out only
+TLS certificate verification is **enabled by default**, consistent with the canon's
+infrastructure-respect posture. It is disabled only by an explicit `--insecure` flag
+(equivalently `--no-verify-tls`), which sets reqwest's `danger_accept_invalid_certs` for
+that single invocation. There is no config key and no implicit relaxation: an operator must
+opt in per request to talk to a target with a bad/self-signed certificate.
+
+### Decision: Capture the final URL/status and a redirect hop count, not the full chain
+By default the client follows redirects (reqwest's default; toggled off by
+`--no-follow-redirects`). The tool records what reqwest exposes cheaply: the **final** URL
+and status after following, plus a **redirect hop count** (the number of redirects
+followed). Capturing the full sequence of intermediate URLs is optional and not required —
+reqwest does not surface the intermediate chain without a custom redirect policy, so the
+contract is the final landing point plus how many hops it took.
+
+### Decision: Response body preview is capped at 64 KB
+The displayed/stored response-body preview is truncated to a default of **64 KB**. Larger
+bodies are captured up to that cap and marked as truncated, so neither the human view nor
+the JSON document carries an unbounded payload. The cap applies to the preview only; signal
+analysis still scans the captured body.
 
 ## Analysis Signals (informs the spec's behavior, kept testable)
 

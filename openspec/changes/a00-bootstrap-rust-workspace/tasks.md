@@ -9,7 +9,7 @@
 - [ ] 1.6 Confirm `cargo build --workspace` links successfully
 
 ## 2. Error model
-- [ ] 2.1 Define a `thiserror`-based `Error` enum in `abyssum-core::error` (variants for Config, Io, and a catch-all) and a `Result<T>` alias
+- [ ] 2.1 Define a `thiserror`-based `Error` enum in `abyssum-core::error` (variants for Config, Io, and a catch-all) and a `Result<T>` alias; mark the enum `#[non_exhaustive]` since later changes append variants (e.g. `ScannerNotFound`, storage/auth errors)
 - [ ] 2.2 Re-export `Error`/`Result` from the crate root
 
 ## 3. Configuration

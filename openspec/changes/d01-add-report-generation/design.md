@@ -50,6 +50,14 @@ Severity orders critical > high > medium > low > info. Markdown groups findings 
 the HackerOne export leads with the single most-severe finding and appends the rest as
 additional findings. Ties break deterministically (e.g. by stored order) so output is stable.
 
+### Decision: "Steps To Reproduce" are detection steps, not exploitation
+Abyssum scanners *detect* misconfigurations; they do not weaponize them (canon). So the
+HackerOne "Steps To Reproduce" section is composed from the finding's own evidence — the
+request that surfaced it (method, target endpoint, notable headers) and the observed response
+signal — i.e. how to *re-observe* the issue, not how to exploit it. There is no exploit
+payload generation; a finding without reproduction evidence falls back to a generic
+"re-run the <scanner> check against <target>" instruction.
+
 ### Decision: Remediation/impact text is built-in content
 v1 keyed remediation, impact, and references off the finding type. v2 keeps that as embedded
 content tables in the report layer rather than storing it per finding, so adding a scanner type

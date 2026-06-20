@@ -19,17 +19,26 @@ capture the full response for inspection.
 - **WHEN** the operator invokes the tool
 - **THEN** the request SHALL carry the supplied body
 
-#### Scenario: Records the redirect chain
+#### Scenario: Records the redirect outcome
 - **GIVEN** a target that responds with one or more redirects to a request configured to
   follow redirects
 - **WHEN** the tool sends the request
-- **THEN** the captured result SHALL include the sequence of redirected URLs
+- **THEN** the captured result SHALL include the final URL and final status after following
+  the redirects
+- **AND** it SHALL include a count of the redirects that were followed
 
 #### Scenario: Transport failure is reported, not fatal
 - **GIVEN** a target that is unreachable or does not respond within the configured timeout
 - **WHEN** the tool sends the request
 - **THEN** it SHALL return a result that reports the error
 - **AND** it SHALL NOT crash the surrounding process
+
+#### Scenario: TLS verification is on unless explicitly disabled
+- **GIVEN** no explicit instruction to skip TLS verification
+- **WHEN** the tool sends a request over TLS
+- **THEN** it SHALL verify the target's TLS certificate
+- **AND** verification SHALL be disabled only when the operator explicitly opts out for that
+  invocation
 
 ### Requirement: Optional Bearer And Cookie Authentication
 The tool SHALL support attaching a bearer token and/or session cookies to a request, where

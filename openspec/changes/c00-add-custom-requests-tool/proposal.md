@@ -19,7 +19,7 @@ with no bearer token and no session cookies must work unchanged.
 
 Accept a target URL plus a chosen HTTP method, zero or more custom headers, and an optional
 request body, then issue exactly one request and capture the full response (status, headers,
-body, timing, and any redirect chain).
+body, timing, and the redirect outcome — final URL/status plus hop count).
 
 ### 2. Optional bearer-token and cookie authentication
 
