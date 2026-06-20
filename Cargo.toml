@@ -29,6 +29,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Async runtime — declared centrally for the surfaces that need it as they grow
 # (orchestration/server land in later changes). Members opt in via `workspace = true`.
 tokio = { version = "1", features = ["full"] }
+# Randomness — the per-request uniform delay draw must be a fresh sample each time
+# (fixed / patterned timing is a fingerprinting vector; see rate-limiting design).
+rand = "0.8"
 
 # Dev-only helpers
 tempfile = "3"
