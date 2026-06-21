@@ -10,10 +10,21 @@ authors.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
+# Cancellation token shared from the orchestrator into each scan context.
+tokio-util = { workspace = true }
+# Object-safe async `BaseScanner` trait.
+async-trait = { workspace = true }
+# Engine-owned HTTP client behind `ScanContext::send`.
+reqwest = { workspace = true }
+# Session identifiers, target URLs, and finding timestamps.
+uuid = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
@@ -21,3 +32,6 @@ tempfile = { workspace = true }
 # `test-util` unlocks the paused/virtual clock so pacing tests are deterministic
 # and issue no real sleeps (see a01 tasks 4.6).
 tokio = { workspace = true, features = ["test-util"] }
+# The orchestration integration tests implement a stub `BaseScanner`.
+async-trait = { workspace = true }
+serde_json = { workspace = true }
