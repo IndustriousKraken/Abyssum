@@ -29,6 +29,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Async runtime — declared centrally for the surfaces that need it as they grow
 # (orchestration/server land in later changes). Members opt in via `workspace = true`.
 tokio = { version = "1", features = ["full"] }
+# Randomness — the rate limiter draws a fresh uniform pacing delay per request
+# (anti-fingerprinting; see a01-add-rate-limiting design.md).
+rand = "0.8"
 
 # Dev-only helpers
 tempfile = "3"
