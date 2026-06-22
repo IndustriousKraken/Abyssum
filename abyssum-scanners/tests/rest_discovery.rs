@@ -292,6 +292,49 @@ async fn soft_404_responses_are_not_reported() {
     assert!(findings[0].title.contains("/health"));
 }
 
+/// An endpoint that streams an oversized body must not be buffered whole: the
+/// scanner caps the body it reads, still classifies by status, and flags the
+/// truncation in the finding evidence. The served body (2 MiB) comfortably
+/// exceeds the scanner's per-probe cap.
+#[tokio::test]
+async fn oversized_response_body_is_capped_and_flagged() {
+    let mut routes = HashMap::new();
+    // text/plain (not a JSON/XML content-type), so api-shaped would otherwise
+    // depend on the body parse — which is skipped for a truncated body.
+    let big = "A".repeat(2 * 1024 * 1024);
+    routes.insert("/big".to_string(), Route::new(200, "text/plain", &big));
+    let mock = start_mock(routes, Route::not_found("nf"), None).await;
+
+    let scanner = RestDiscoveryScanner::with_paths(["/big"]);
+    let findings = scanner
+        .scan(
+            &mock.target(),
+            &ctx_with(no_pacing(), CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "the oversized endpoint is still discovered by status: {findings:#?}"
+    );
+    let evidence = findings[0].evidence.as_ref().unwrap();
+    assert_eq!(evidence["status"], 200);
+    assert_eq!(
+        evidence["body_truncated"], true,
+        "an oversized body must be flagged truncated"
+    );
+    let body_length = evidence["body_length"].as_u64().unwrap();
+    assert!(
+        body_length < big.len() as u64,
+        "the buffered body must be capped below the served size: {body_length} vs {}",
+        big.len()
+    );
+    // A truncated text/plain body is not parsed as JSON, so it is not api-shaped.
+    assert_eq!(evidence["api_shaped"], false);
+}
+
 /// Task 5.3 + spec scenario "Stops promptly on cancellation": cancellation halts
 /// further requests and the scan returns the findings gathered so far.
 #[tokio::test]

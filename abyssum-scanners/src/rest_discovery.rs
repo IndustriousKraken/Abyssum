@@ -52,6 +52,15 @@ const SOFT_404_LEN_TOLERANCE: usize = 64;
 /// hash — two short responses of similar length are not reliably "the same page".
 const SOFT_404_MIN_BODY_FOR_LEN_MATCH: usize = 256;
 
+/// Upper bound on the response body buffered per probe. A probed endpoint is
+/// untrusted and could stream an unbounded (or maliciously large) response, so
+/// the scanner never reads a whole body into memory: bytes beyond this cap are
+/// dropped and the response is flagged `truncated`. Classification keys on the
+/// status code, so a capped body never changes the verdict — only the
+/// body-derived signals (the soft-404 hash and the api-shaped check) treat a
+/// truncated body conservatively.
+const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
 /// Where a [`RestDiscoveryScanner`] draws its candidate paths.
 enum CandidateSource {
     /// The seeded reference-data store: loaded once per scan run by list name.
@@ -164,10 +173,25 @@ impl BaseScanner for RestDiscoveryScanner {
                         findings.push(finding);
                     }
                 }
-                Err(_) => {
+                // Cancellation is not a transport failure: surface it to the
+                // orchestrator rather than masking it as a partial success.
+                // (`ScanContext::send` does not currently raise `Cancelled` — the
+                // loop's `is_cancelled()` check above handles the cooperative
+                // case — but matching it explicitly keeps the contract robust if
+                // the request path ever becomes cancellation-aware.)
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(err) => {
                     // A transport failure or a pacing halt (sustained target
-                    // distress). Respect it: stop probing this host and return what
-                    // we have rather than hammering a struggling target.
+                    // distress). Respect it: stop probing this host and return the
+                    // findings gathered so far rather than hammering a struggling
+                    // target — but log the halt so it is not silent.
+                    tracing::warn!(
+                        scanner = ID,
+                        path = %path,
+                        error = %err,
+                        "stopping REST discovery after a request failure; \
+                         returning partial findings"
+                    );
                     break;
                 }
             }
@@ -233,6 +257,10 @@ struct ProbeResponse {
     status: u16,
     content_type: Option<String>,
     body: Vec<u8>,
+    /// Whether the body was capped at [`MAX_BODY_BYTES`] (more bytes were
+    /// available but dropped). A truncated body is an incomplete fragment, so
+    /// body-derived signals are treated conservatively.
+    truncated: bool,
 }
 
 /// A fingerprint of the soft-404 baseline response.
@@ -241,6 +269,7 @@ struct Baseline {
     status: u16,
     body_hash: u64,
     body_len: usize,
+    truncated: bool,
 }
 
 impl Baseline {
@@ -249,6 +278,7 @@ impl Baseline {
             status: response.status,
             body_hash: normalized_body_hash(&response.body),
             body_len: response.body.len(),
+            truncated: response.truncated,
         }
     }
 
@@ -261,6 +291,13 @@ impl Baseline {
         }
         if normalized_body_hash(&response.body) == self.body_hash {
             return true;
+        }
+        // The length-similarity shortcut is unsafe once a body was capped: two
+        // distinct oversized pages both truncated to `MAX_BODY_BYTES` share an
+        // identical length but are not the same page. When either side was
+        // truncated, fall back to the exact (prefix) hash match decided above.
+        if self.truncated || response.truncated {
+            return false;
         }
         if self.body_len >= SOFT_404_MIN_BODY_FOR_LEN_MATCH {
             return response.body.len().abs_diff(self.body_len) <= SOFT_404_LEN_TOLERANCE;
@@ -310,7 +347,11 @@ fn is_api_shaped(response: &ProbeResponse) -> bool {
             return true;
         }
     }
-    serde_json::from_slice::<serde_json::Value>(&response.body).is_ok()
+    // A truncated body is an incomplete fragment — parsing it as JSON would be
+    // unreliable (a capped document almost always fails mid-token), so the
+    // content-type header is the only trustworthy api-shaped signal for an
+    // oversized response.
+    !response.truncated && serde_json::from_slice::<serde_json::Value>(&response.body).is_ok()
 }
 
 /// Classify one probed response against the soft-404 baseline.
@@ -382,6 +423,7 @@ fn finding_for(
         "content_type": response.content_type,
         "api_shaped": is_api_shaped(response),
         "body_length": response.body.len(),
+        "body_truncated": response.truncated,
         "classification": label,
     });
 
@@ -397,23 +439,44 @@ fn finding_for(
 
 /// Probe one URL through the paced scan context and reduce the response to the
 /// fields classification needs.
+///
+/// The body is streamed through a bounded reader that buffers at most
+/// [`MAX_BODY_BYTES`]: a probed endpoint is untrusted and could return an
+/// unbounded (or maliciously large) body, and classification keys on the status
+/// code — already in hand — so an oversized body is capped and flagged
+/// (`truncated`) rather than read whole into memory.
 async fn probe(ctx: &ScanContext, url: Url) -> Result<ProbeResponse> {
-    let response = ctx.send(RequestSpec::get(url)).await?;
+    let mut response = ctx.send(RequestSpec::get(url)).await?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
-    let body = response
-        .bytes()
+
+    // Read chunks only up to the cap. Stopping early drops `response`, closing
+    // the connection rather than draining the remaining (unwanted) bytes.
+    let mut body = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|e| Error::Http(e.to_string()))?
-        .to_vec();
+    {
+        let remaining = MAX_BODY_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
     Ok(ProbeResponse {
         status,
         content_type,
         body,
+        truncated,
     })
 }
 
@@ -438,6 +501,17 @@ mod tests {
             status,
             content_type: content_type.map(|s| s.to_string()),
             body: body.as_bytes().to_vec(),
+            truncated: false,
+        }
+    }
+
+    /// A response whose body was capped at the probe cap.
+    fn resp_truncated(status: u16, content_type: Option<&str>, body: &str) -> ProbeResponse {
+        ProbeResponse {
+            status,
+            content_type: content_type.map(|s| s.to_string()),
+            body: body.as_bytes().to_vec(),
+            truncated: true,
         }
     }
 
@@ -621,6 +695,43 @@ mod tests {
             "<html></html>"
         )));
         assert!(!is_api_shaped(&resp(200, None, "plain text")));
+    }
+
+    // --- Body cap / truncation -------------------------------------------------
+
+    #[test]
+    fn truncated_body_relies_on_content_type_only_for_api_shaped() {
+        // A JSON/XML content-type still flags api-shaped even when the body was
+        // capped — the header is not truncated.
+        assert!(is_api_shaped(&resp_truncated(
+            200,
+            Some("application/json"),
+            r#"{"partial":"#
+        )));
+        // A truncated body with no JSON/XML content-type is NOT parsed as JSON: a
+        // capped fragment cannot be trusted, even if its prefix looks like JSON.
+        assert!(!is_api_shaped(&resp_truncated(
+            200,
+            Some("text/plain"),
+            r#"{"k":1}"#
+        )));
+        // The very same body, untruncated, parses and is api-shaped.
+        assert!(is_api_shaped(&resp(200, Some("text/plain"), r#"{"k":1}"#)));
+    }
+
+    #[test]
+    fn truncated_bodies_only_soft_404_match_by_exact_hash() {
+        // Two distinct oversized pages, both capped to the same length: the
+        // length-similarity shortcut must NOT collapse them to one not-found page.
+        let baseline = Baseline::from_response(&resp_truncated(200, None, &"a".repeat(1000)));
+        let other = resp_truncated(200, None, &"b".repeat(1000));
+        assert!(
+            !baseline.matches(&other),
+            "distinct truncated pages must not match by length alone"
+        );
+        // An identical (prefix) truncated body still matches by hash.
+        let same = resp_truncated(200, None, &"a".repeat(1000));
+        assert!(baseline.matches(&same));
     }
 
     // --- Finding construction (task 4.3) ---------------------------------------
