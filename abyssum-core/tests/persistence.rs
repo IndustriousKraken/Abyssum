@@ -551,6 +551,30 @@ async fn list_sessions_is_newest_first_with_paging() {
     assert_eq!(page2[0].id, first.id);
 }
 
+#[tokio::test]
+async fn list_sessions_clamps_non_positive_limit_and_negative_offset() {
+    let (db, _dir) = fresh_store().await;
+    let first = ScanSession::new(vec![target("https://1.example.com")], vec!["rest".into()]);
+    let second = ScanSession::new(vec![target("https://2.example.com")], vec!["rest".into()]);
+    db.save_session(&first).await.unwrap();
+    db.save_session(&second).await.unwrap();
+
+    // A negative LIMIT is "no limit" to SQLite; binding it verbatim would bypass
+    // the bound entirely. It must instead fall back to the default cap (which,
+    // for this small store, returns every session) rather than going unbounded.
+    let neg_limit = db.list_sessions(-1, 0).await.unwrap();
+    assert_eq!(neg_limit.len(), 2);
+    assert_eq!(neg_limit[0].id, second.id);
+
+    // A zero limit is degenerate and likewise falls back to the default cap.
+    assert_eq!(db.list_sessions(0, 0).await.unwrap().len(), 2);
+
+    // A negative offset is clamped to 0 (no rows skipped).
+    let neg_offset = db.list_sessions(2, -5).await.unwrap();
+    assert_eq!(neg_offset.len(), 2);
+    assert_eq!(neg_offset[0].id, second.id);
+}
+
 // --- 5.4 Summary counts ----------------------------------------------------
 
 #[tokio::test]

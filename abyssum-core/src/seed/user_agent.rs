@@ -89,7 +89,11 @@ impl RotatingUserAgent {
             0 => DEFAULT_USER_AGENT.to_string(), // unreachable: `new` guarantees non-empty
             1 => self.pool[0].clone(),
             len => {
-                let mut last = self.last.lock().unwrap();
+                // Recover from a poisoned lock rather than propagating the panic:
+                // the guarded value is just a last-index hint, so a poisoned state
+                // is harmless to reuse, and a single panic must not take every
+                // later UA pick (and thus the whole scan) down with it.
+                let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
                 let mut rng = rand::thread_rng();
                 // Rejection-sample so every identity *other than* the immediately
                 // previous one is equally likely. A deterministic `(idx + 1) % len`
@@ -114,7 +118,9 @@ impl UserAgentSource for RotatingUserAgent {
         match self.mode {
             UserAgentRotation::PerRequest => self.pick(),
             UserAgentRotation::PerScan => {
-                let mut pinned = self.pinned.lock().unwrap();
+                // Same resilience as `pick`: recover the pinned identity from a
+                // poisoned lock instead of panicking every subsequent request.
+                let mut pinned = self.pinned.lock().unwrap_or_else(|e| e.into_inner());
                 pinned.get_or_insert_with(|| self.pick()).clone()
             }
         }

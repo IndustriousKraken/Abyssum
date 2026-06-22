@@ -227,8 +227,15 @@ impl DatabaseManager {
     /// `findings` list); load a session's findings with [`get_session`] or
     /// [`get_findings`].
     ///
+    /// A non-positive `limit` falls back to [`DEFAULT_SEARCH_LIMIT`] and a
+    /// negative `offset` is treated as `0`, mirroring [`search_findings`]: SQLite
+    /// reads a negative `LIMIT` as "no limit", so binding one verbatim would
+    /// silently return an unbounded result set. Clamping here keeps every listing
+    /// bounded even when a caller passes a stray negative page size.
+    ///
     /// [`get_session`]: DatabaseManager::get_session
     /// [`get_findings`]: DatabaseManager::get_findings
+    /// [`search_findings`]: DatabaseManager::search_findings
     pub async fn list_sessions(&self, limit: i64, offset: i64) -> Result<Vec<ScanSession>> {
         let rows = sqlx::query(
             "SELECT session_id, status, targets_json, scanners_json, error_count, \
@@ -237,8 +244,8 @@ impl DatabaseManager {
              ORDER BY created_at DESC, id DESC \
              LIMIT ? OFFSET ?",
         )
-        .bind(limit)
-        .bind(offset)
+        .bind(resolve_search_limit(Some(limit)))
+        .bind(offset.max(0))
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
