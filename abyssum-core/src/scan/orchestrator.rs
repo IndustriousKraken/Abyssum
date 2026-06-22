@@ -49,6 +49,42 @@ struct ActiveSession {
     session: SessionHandle,
 }
 
+/// RAII safety net for [`Orchestrator::run`]. Its [`Drop`] guarantees the session
+/// is removed from the active map and left in a terminal state even if `run`
+/// unwinds — most notably when a scanner's `scan()` future *panics* and the panic
+/// propagates through the `tokio::select!`, skipping the normal finalization. A
+/// panicking scanner can therefore never orphan a permanently-`Running` session
+/// in the active map (where a later `cancel()` would still find a dead future).
+///
+/// The normal path disarms the guard after finalizing, so on success its `Drop`
+/// is a no-op.
+struct RunGuard<'a> {
+    active: &'a Mutex<HashMap<Uuid, ActiveSession>>,
+    session_id: Uuid,
+    session: SessionHandle,
+    armed: bool,
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Unwind path: `run` did not finish normally. Drop the session from the
+        // active map and, if it is still non-terminal, mark it `Errored` so
+        // observers never see a stuck `Running` session and `cancel()` no longer
+        // finds it. The scan panic happens with no session lock held, so the
+        // lock is not poisoned; guard against poisoning anyway.
+        self.active.lock().unwrap().remove(&self.session_id);
+        if let Ok(mut s) = self.session.lock() {
+            if !s.status.is_terminal() {
+                s.finished_at = Some(Utc::now());
+                s.status = SessionStatus::Errored;
+            }
+        }
+    }
+}
+
 /// Drives scans. Holds the registry, the shared pacing authority, the engine's
 /// HTTP client and User-Agent source, a progress broadcast, and the set of
 /// active sessions.
@@ -171,6 +207,16 @@ impl Orchestrator {
         let cancel = active.cancel.clone();
         let session = active.session.clone();
 
+        // Arm the unwind safety net before any scanner runs: if a scanner panics
+        // and the panic propagates out of the loop below, this guard's `Drop`
+        // still removes the session from `active` and marks it terminal.
+        let mut guard = RunGuard {
+            active: &self.active,
+            session_id,
+            session: session.clone(),
+            armed: true,
+        };
+
         // Snapshot the plan and mark Running.
         let (scanner_ids, targets) = {
             let mut s = session.lock().unwrap();
@@ -259,6 +305,8 @@ impl Orchestrator {
         };
 
         self.active.lock().unwrap().remove(&session_id);
+        // Normal completion handled cleanup; disarm the unwind safety net.
+        guard.armed = false;
         Ok(final_session)
     }
 

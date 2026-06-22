@@ -19,14 +19,16 @@ use tokio::sync::Notify;
 
 /// Task 7.1: a stub scanner that needs no network. It reports one progress
 /// update per finding and returns `findings_per_target` findings, unless the
-/// target's host matches `error_on_host` (then it errors) or `block_on_host`
-/// (then it signals `started` and blocks forever, to be cancelled).
+/// target's host matches `error_on_host` (then it errors), `block_on_host`
+/// (then it signals `started` and blocks forever, to be cancelled), or
+/// `panic_on_host` (then it panics, to exercise the run's unwind safety net).
 #[derive(Clone)]
 struct StubScanner {
     id: String,
     findings_per_target: usize,
     error_on_host: Option<String>,
     block_on_host: Option<String>,
+    panic_on_host: Option<String>,
     started: Arc<Notify>,
 }
 
@@ -37,6 +39,7 @@ impl StubScanner {
             findings_per_target,
             error_on_host: None,
             block_on_host: None,
+            panic_on_host: None,
             started: Arc::new(Notify::new()),
         }
     }
@@ -59,6 +62,10 @@ impl BaseScanner for StubScanner {
 
         if self.error_on_host.as_deref() == Some(host.as_str()) {
             return Err(Error::Other(format!("stub configured to fail on {host}")));
+        }
+
+        if self.panic_on_host.as_deref() == Some(host.as_str()) {
+            panic!("stub configured to panic on {host}");
         }
 
         if self.block_on_host.as_deref() == Some(host.as_str()) {
@@ -210,6 +217,7 @@ async fn cancel_mid_scan_is_prompt_and_keeps_partial_findings() {
         findings_per_target: 1,
         error_on_host: None,
         block_on_host: Some("block.test".into()),
+        panic_on_host: None,
         started: started.clone(),
     };
     let orch = Arc::new(orchestrator_with(vec![stub]));
@@ -238,6 +246,47 @@ async fn cancel_mid_scan_is_prompt_and_keeps_partial_findings() {
     assert_eq!(handle.lock().unwrap().status, SessionStatus::Cancelled);
 }
 
+/// A scanner that panics mid-run must not orphan the session: the run's unwind
+/// safety net removes it from the active map (so a later `cancel()` no longer
+/// finds a dead future) and leaves it in a terminal state (never stuck
+/// `Running`). The panic itself still propagates out of `run`.
+#[tokio::test]
+async fn scanner_panic_does_not_orphan_session() {
+    let stub = StubScanner {
+        id: "stub".into(),
+        findings_per_target: 1,
+        error_on_host: None,
+        block_on_host: None,
+        panic_on_host: Some("boom.test".into()),
+        started: Arc::new(Notify::new()),
+    };
+    let orch = Arc::new(orchestrator_with(vec![stub]));
+
+    let handle = orch
+        .create_session(vec![target("boom.test")], vec!["stub".into()])
+        .unwrap();
+    let id = handle.lock().unwrap().id;
+
+    // The panic propagates out of `run`; capture it as a JoinError so the test
+    // process survives and can inspect the aftermath.
+    let runner = orch.clone();
+    let result = tokio::spawn(async move { runner.run(id, None).await }).await;
+    assert!(
+        result.is_err(),
+        "the scanner panic must propagate out of run"
+    );
+
+    // The session is no longer Running, and is no longer in the active map.
+    assert!(
+        handle.lock().unwrap().status.is_terminal(),
+        "a panicking scanner must not leave the session stuck Running"
+    );
+    assert!(
+        orch.cancel(id).is_err(),
+        "the orphaned session must have been removed from the active map"
+    );
+}
+
 /// Cancelling before the run even starts still ends `Cancelled`.
 #[tokio::test]
 async fn cancel_before_run_yields_cancelled() {
@@ -261,6 +310,7 @@ async fn per_target_error_is_counted_without_aborting() {
         findings_per_target: 1,
         error_on_host: Some("err.test".into()),
         block_on_host: None,
+        panic_on_host: None,
         started: Arc::new(Notify::new()),
     };
     let orch = orchestrator_with(vec![stub]);

@@ -266,7 +266,9 @@ impl RateLimiter {
         if max <= min {
             return self.inner.min_delay;
         }
-        let secs = rand::thread_rng().gen_range(min..max);
+        // Inclusive range so the draw matches the documented `[min, max]` band
+        // exactly (the half-open `min..max` could never return `max`).
+        let secs = rand::thread_rng().gen_range(min..=max);
         Duration::from_secs_f64(secs)
     }
 }
