@@ -63,13 +63,19 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     /// Open (creating if absent) the store at `path`, ensuring its parent
-    /// directory exists, then apply any pending migrations before returning.
+    /// directory exists, apply any pending migrations, then seed the curated
+    /// reference data (wordlists + the User-Agent pool) before returning.
+    ///
+    /// Seeding is idempotent (see [`seed_reference_data`]), so reopening an
+    /// already-populated store is a no-op — this is the first-run self-seeding
+    /// path, and it runs regardless of how Abyssum was installed.
     ///
     /// The path is the resolved `database.path`; see [`connect_from_config`]. A
-    /// failure to create the directory, open the pool, or migrate surfaces as
-    /// [`Error::Database`] (or [`Error::Io`] for the directory).
+    /// failure to create the directory, open the pool, migrate, or seed surfaces
+    /// as [`Error::Database`] (or [`Error::Io`] for the directory).
     ///
     /// [`connect_from_config`]: DatabaseManager::connect_from_config
+    /// [`seed_reference_data`]: DatabaseManager::seed_reference_data
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -109,7 +115,9 @@ impl DatabaseManager {
             .await
             .map_err(|e| Error::Database(format!("failed to apply migrations: {e}")))?;
 
-        Ok(Self { pool })
+        let manager = Self { pool };
+        manager.seed_reference_data().await?;
+        Ok(manager)
     }
 
     /// Open the store at the path resolved from `config.database.path`.
@@ -120,6 +128,27 @@ impl DatabaseManager {
     /// The underlying connection pool, for components that need to share it.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Seed the curated reference data (wordlists + the User-Agent pool) from the
+    /// bundled assets, idempotently. [`connect`] calls this on open so a fresh
+    /// store is populated on first run; it is also exposed so an installer or CLI
+    /// can invoke seeding explicitly (e.g. an `abyssum init` / `--seed` path).
+    /// Running it against an already-seeded store inserts nothing.
+    ///
+    /// [`connect`]: DatabaseManager::connect
+    pub async fn seed_reference_data(&self) -> Result<()> {
+        crate::seed::ReferenceStore::new(self.pool.clone())
+            .seed()
+            .await
+    }
+
+    /// A [`ReferenceStore`] over this manager's pool, for reading the seeded
+    /// wordlists and User-Agent pool.
+    ///
+    /// [`ReferenceStore`]: crate::seed::ReferenceStore
+    pub fn reference_store(&self) -> crate::seed::ReferenceStore {
+        crate::seed::ReferenceStore::new(self.pool.clone())
     }
 
     /// Close the pool, flushing and releasing all connections. Optional — dropping

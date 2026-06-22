@@ -21,8 +21,9 @@ pub mod logging;
 pub mod persistence;
 pub mod rate_limiter;
 pub mod scan;
+pub mod seed;
 
-pub use config::Config;
+pub use config::{Config, UserAgentRotation};
 pub use error::{Error, Result};
 pub use persistence::{DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT};
 pub use rate_limiter::{Pace, RateLimiter};
@@ -32,3 +33,4 @@ pub use scan::{
     ScannerRegistry, SessionHandle, SessionProgress, SessionStatus, Severity, SingleUserAgent,
     Status, Target, UserAgentSource,
 };
+pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};
