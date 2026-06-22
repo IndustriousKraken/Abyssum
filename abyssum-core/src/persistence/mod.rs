@@ -42,7 +42,7 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::error::{Error, Result};
+use crate::error::{db_err, Error, Result};
 use crate::scan::{Finding, FindingId, ScanSession, SessionStatus, Severity, Status, Target};
 
 /// Migrations embedded at compile time from `abyssum-core/migrations/`. Applied
@@ -53,6 +53,13 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// filter does not request its own limit. Keeps a surface from accidentally
 /// loading an unbounded result set.
 pub const DEFAULT_SEARCH_LIMIT: i64 = 1000;
+
+/// Hard ceiling on rows returned by a single query, regardless of the limit a
+/// caller requests. A filter (or `list_sessions` page size) asking for more than
+/// this is clamped down to it, so even an explicit `i64::MAX` can never load an
+/// unbounded result set into memory. Set well above [`DEFAULT_SEARCH_LIMIT`] so
+/// it only bites pathological requests, not ordinary paging.
+pub const MAX_SEARCH_LIMIT: i64 = 10_000;
 
 /// Owns the connection pool to the result store and exposes async persistence and
 /// query operations over sessions and findings.
@@ -230,11 +237,12 @@ impl DatabaseManager {
     /// `findings` list); load a session's findings with [`get_session`] or
     /// [`get_findings`].
     ///
-    /// A non-positive `limit` falls back to [`DEFAULT_SEARCH_LIMIT`] and a
-    /// negative `offset` is treated as `0`, mirroring [`search_findings`]: SQLite
-    /// reads a negative `LIMIT` as "no limit", so binding one verbatim would
-    /// silently return an unbounded result set. Clamping here keeps every listing
-    /// bounded even when a caller passes a stray negative page size.
+    /// A non-positive `limit` falls back to [`DEFAULT_SEARCH_LIMIT`], a `limit`
+    /// above [`MAX_SEARCH_LIMIT`] is clamped down to it, and a negative `offset` is
+    /// treated as `0`, mirroring [`search_findings`]: SQLite reads a negative
+    /// `LIMIT` as "no limit", so binding one verbatim would silently return an
+    /// unbounded result set. Clamping here keeps every listing bounded even when a
+    /// caller passes a stray negative page size or an enormous one.
     ///
     /// [`get_session`]: DatabaseManager::get_session
     /// [`get_findings`]: DatabaseManager::get_findings
@@ -314,7 +322,7 @@ impl DatabaseManager {
     /// (status, severity, scanner id, target, free-text over title/description, a
     /// session id, and a `from`/`to` date range over the timestamp), combined with
     /// `AND`. Results are ordered newest-first and capped at the filter's limit (or
-    /// [`DEFAULT_SEARCH_LIMIT`]).
+    /// [`DEFAULT_SEARCH_LIMIT`] when unset), never exceeding [`MAX_SEARCH_LIMIT`].
     pub async fn search_findings(&self, filter: &FindingFilter) -> Result<Vec<Finding>> {
         let mut qb: QueryBuilder<Sqlite> =
             QueryBuilder::new(format!("{FINDING_COLUMNS_SELECT} WHERE 1 = 1"));
@@ -473,7 +481,8 @@ pub struct FindingFilter {
     pub from: Option<DateTime<Utc>>,
     /// Inclusive upper bound on the finding timestamp.
     pub to: Option<DateTime<Utc>>,
-    /// Maximum rows to return (defaults to [`DEFAULT_SEARCH_LIMIT`]).
+    /// Maximum rows to return (defaults to [`DEFAULT_SEARCH_LIMIT`], capped at
+    /// [`MAX_SEARCH_LIMIT`]).
     pub limit: Option<i64>,
 }
 
@@ -576,11 +585,6 @@ impl Summary {
     }
 }
 
-/// Wrap any displayable error (sqlx, serde_json, uuid, …) as [`Error::Database`].
-fn db_err<E: std::fmt::Display>(err: E) -> Error {
-    Error::Database(err.to_string())
-}
-
 /// Convert a scan-scale `usize` count to the `i64` SQLite stores. These are
 /// scanner-target unit and error counts that never approach `i64::MAX` in
 /// practice; saturating (rather than `as`-casting) just makes the conversion
@@ -605,14 +609,17 @@ fn push_in_list(qb: &mut QueryBuilder<'_, Sqlite>, ids: &[String]) {
     }
 }
 
-/// Resolve the effective search limit. A missing limit, or a non-positive one,
-/// falls back to [`DEFAULT_SEARCH_LIMIT`]: SQLite treats a negative `LIMIT` as
-/// "no limit", so binding one verbatim would silently bypass the cap and return
-/// an unbounded result set. Clamping here keeps every search bounded even when a
-/// caller constructs a filter with a stray `Some(-1)` or `Some(0)`.
+/// Resolve the effective search limit, bounding it on both ends. A missing limit,
+/// or a non-positive one, falls back to [`DEFAULT_SEARCH_LIMIT`]: SQLite treats a
+/// negative `LIMIT` as "no limit", so binding one verbatim would silently bypass
+/// the cap and return an unbounded result set. A positive limit is honored but
+/// clamped down to [`MAX_SEARCH_LIMIT`], so even an explicit `i64::MAX` cannot
+/// load millions of rows into memory. Clamping here keeps every search bounded
+/// even when a caller constructs a filter with a stray `Some(-1)`, `Some(0)`, or
+/// an enormous limit.
 fn resolve_search_limit(limit: Option<i64>) -> i64 {
     match limit {
-        Some(limit) if limit > 0 => limit,
+        Some(limit) if limit > 0 => limit.min(MAX_SEARCH_LIMIT),
         _ => DEFAULT_SEARCH_LIMIT,
     }
 }
@@ -859,13 +866,24 @@ mod tests {
     }
 
     #[test]
-    fn search_limit_clamps_missing_and_non_positive_to_the_default() {
+    fn search_limit_clamps_missing_non_positive_and_oversized() {
         assert_eq!(resolve_search_limit(Some(25)), 25);
         assert_eq!(resolve_search_limit(None), DEFAULT_SEARCH_LIMIT);
         // A negative LIMIT is "no limit" in SQLite; a zero limit is degenerate.
         // Both must fall back to the cap rather than returning an unbounded set.
         assert_eq!(resolve_search_limit(Some(-1)), DEFAULT_SEARCH_LIMIT);
         assert_eq!(resolve_search_limit(Some(0)), DEFAULT_SEARCH_LIMIT);
+        // A positive limit at or below the ceiling is honored verbatim; one above
+        // it (up to i64::MAX) is clamped down so it can never load an unbounded set.
+        assert_eq!(
+            resolve_search_limit(Some(MAX_SEARCH_LIMIT)),
+            MAX_SEARCH_LIMIT
+        );
+        assert_eq!(
+            resolve_search_limit(Some(MAX_SEARCH_LIMIT + 1)),
+            MAX_SEARCH_LIMIT
+        );
+        assert_eq!(resolve_search_limit(Some(i64::MAX)), MAX_SEARCH_LIMIT);
     }
 
     #[test]

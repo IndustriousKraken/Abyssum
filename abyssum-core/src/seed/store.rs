@@ -13,7 +13,7 @@
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 
-use crate::error::{Error, Result};
+use crate::error::{db_err, Result};
 
 use super::assets;
 
@@ -180,9 +180,4 @@ impl ReferenceStore {
             .map(|row| row.try_get("value").map_err(db_err))
             .collect()
     }
-}
-
-/// Wrap any displayable error (sqlx, …) as [`Error::Database`].
-fn db_err<E: std::fmt::Display>(err: E) -> Error {
-    Error::Database(err.to_string())
 }

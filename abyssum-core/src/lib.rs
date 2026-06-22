@@ -25,7 +25,9 @@ pub mod seed;
 
 pub use config::{Config, UserAgentRotation};
 pub use error::{Error, Result};
-pub use persistence::{DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT};
+pub use persistence::{
+    DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
+};
 pub use rate_limiter::{Pace, RateLimiter};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Method, Orchestrator,
