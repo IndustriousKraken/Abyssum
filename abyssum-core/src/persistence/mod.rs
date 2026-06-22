@@ -81,9 +81,12 @@ impl DatabaseManager {
 
         // Create the parent directory if the configured path nests the file (e.g.
         // the default `data/abyssum.db`). A bare filename has no parent to make.
+        // Use the async filesystem API so this `async fn` never issues a blocking
+        // syscall on the executor — `connect` is a startup path today, but keeping
+        // it await-friendly means it stays safe to call from any async context.
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+                tokio::fs::create_dir_all(parent).await?;
             }
         }
 
@@ -192,9 +195,9 @@ impl DatabaseManager {
         .bind(session_status_str(session.status))
         .bind(targets_json)
         .bind(scanners_json)
-        .bind(session.error_count as i64)
-        .bind(session.completed_units as i64)
-        .bind(session.total_units as i64)
+        .bind(count_to_i64(session.error_count))
+        .bind(count_to_i64(session.completed_units))
+        .bind(count_to_i64(session.total_units))
         .bind(session.started_at)
         .bind(session.finished_at)
         .execute(&self.pool)
@@ -578,6 +581,22 @@ fn db_err<E: std::fmt::Display>(err: E) -> Error {
     Error::Database(err.to_string())
 }
 
+/// Convert a scan-scale `usize` count to the `i64` SQLite stores. These are
+/// scanner-target unit and error counts that never approach `i64::MAX` in
+/// practice; saturating (rather than `as`-casting) just makes the conversion
+/// total so an out-of-range value can never silently wrap to a negative.
+fn count_to_i64(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// Convert a stored count back to `usize`, clamping a (never-expected) negative
+/// value to `0` rather than wrapping it to a huge `usize` the way an `as` cast
+/// would. The store only ever writes non-negative counts via [`count_to_i64`];
+/// this guards the read path against a corrupted or externally-edited row.
+fn count_to_usize(count: i64) -> usize {
+    usize::try_from(count).unwrap_or(0)
+}
+
 /// Push a comma-separated, parameter-bound list of ids into an `IN (...)` clause.
 fn push_in_list(qb: &mut QueryBuilder<'_, Sqlite>, ids: &[String]) {
     let mut separated = qb.separated(", ");
@@ -635,9 +654,9 @@ fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
         scanner_ids,
         status,
         findings: Vec::new(),
-        error_count: error_count as usize,
-        completed_units: completed_units as usize,
-        total_units: total_units as usize,
+        error_count: count_to_usize(error_count),
+        completed_units: count_to_usize(completed_units),
+        total_units: count_to_usize(total_units),
         started_at,
         finished_at,
     })
@@ -855,5 +874,19 @@ mod tests {
         assert_eq!(map.len(), 5);
         assert!(map.values().all(|&count| count == 0));
         assert!(map.contains_key(&Severity::Critical));
+    }
+
+    #[test]
+    fn count_conversions_round_trip_and_clamp_out_of_range() {
+        // Scan-scale counts round-trip exactly through both conversions.
+        for count in [0usize, 1, 42, 1_000_000] {
+            assert_eq!(count_to_usize(count_to_i64(count)), count);
+        }
+        // A usize beyond i64::MAX saturates rather than wrapping negative.
+        assert_eq!(count_to_i64(usize::MAX), i64::MAX);
+        // A (never-expected) negative stored value clamps to 0 instead of
+        // wrapping to a huge usize the way an `as` cast would.
+        assert_eq!(count_to_usize(-1), 0);
+        assert_eq!(count_to_usize(i64::MIN), 0);
     }
 }
