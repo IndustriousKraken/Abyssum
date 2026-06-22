@@ -45,6 +45,12 @@ pub enum Error {
     #[error("scan cancelled")]
     Cancelled,
 
+    /// A persistence operation failed: opening the store, running a migration,
+    /// (de)serializing a stored field, or executing a query. Added by
+    /// `add-result-persistence` (a03); the error model's doc anticipates this.
+    #[error("database error: {0}")]
+    Database(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

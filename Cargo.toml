@@ -48,6 +48,19 @@ serde_json = "1"
 # Randomness — the rate limiter draws a fresh uniform pacing delay per request
 # (anti-fingerprinting; see a01-add-rate-limiting design.md).
 rand = "0.8"
+# Durable result storage — async SQLite via sqlx (see a03-add-result-persistence
+# design.md). `sqlite` bundles the SQLite amalgamation (no system libsqlite3
+# required); `macros` + `migrate` provide the compile-time-embedded migration set
+# applied idempotently on startup; `chrono` lets session/finding timestamps bind
+# and decode directly. `runtime-tokio` shares the engine's Tokio runtime; no TLS
+# feature is enabled because the store is a local file.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+    "chrono",
+] }
 
 # Dev-only helpers
 tempfile = "3"
