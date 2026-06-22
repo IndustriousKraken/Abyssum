@@ -266,12 +266,12 @@ impl DatabaseManager {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id.to_string())
-        .bind(finding.scanner_id.clone())
+        .bind(finding.scanner_id.as_str())
         .bind(status_str(finding.status))
         .bind(severity_str(finding.severity))
-        .bind(finding.title.clone())
-        .bind(finding.description.clone())
-        .bind(finding.recommendations.clone())
+        .bind(finding.title.as_str())
+        .bind(finding.description.as_deref())
+        .bind(finding.recommendations.as_deref())
         .bind(target_json)
         .bind(target_full_url)
         .bind(evidence_json)
@@ -341,7 +341,7 @@ impl DatabaseManager {
         }
 
         qb.push(" ORDER BY timestamp DESC, id DESC LIMIT ");
-        qb.push_bind(filter.limit.unwrap_or(DEFAULT_SEARCH_LIMIT));
+        qb.push_bind(resolve_search_limit(filter.limit));
 
         let rows = qb.build().fetch_all(&self.pool).await.map_err(db_err)?;
         rows.iter().map(row_to_finding).collect()
@@ -576,6 +576,18 @@ fn push_in_list(qb: &mut QueryBuilder<'_, Sqlite>, ids: &[String]) {
     let mut separated = qb.separated(", ");
     for id in ids {
         separated.push_bind(id.clone());
+    }
+}
+
+/// Resolve the effective search limit. A missing limit, or a non-positive one,
+/// falls back to [`DEFAULT_SEARCH_LIMIT`]: SQLite treats a negative `LIMIT` as
+/// "no limit", so binding one verbatim would silently bypass the cap and return
+/// an unbounded result set. Clamping here keeps every search bounded even when a
+/// caller constructs a filter with a stray `Some(-1)` or `Some(0)`.
+fn resolve_search_limit(limit: Option<i64>) -> i64 {
+    match limit {
+        Some(limit) if limit > 0 => limit,
+        _ => DEFAULT_SEARCH_LIMIT,
     }
 }
 
@@ -818,6 +830,16 @@ mod tests {
     fn escape_like_escapes_metacharacters() {
         assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
         assert_eq!(escape_like("plain"), "plain");
+    }
+
+    #[test]
+    fn search_limit_clamps_missing_and_non_positive_to_the_default() {
+        assert_eq!(resolve_search_limit(Some(25)), 25);
+        assert_eq!(resolve_search_limit(None), DEFAULT_SEARCH_LIMIT);
+        // A negative LIMIT is "no limit" in SQLite; a zero limit is degenerate.
+        // Both must fall back to the cap rather than returning an unbounded set.
+        assert_eq!(resolve_search_limit(Some(-1)), DEFAULT_SEARCH_LIMIT);
+        assert_eq!(resolve_search_limit(Some(0)), DEFAULT_SEARCH_LIMIT);
     }
 
     #[test]

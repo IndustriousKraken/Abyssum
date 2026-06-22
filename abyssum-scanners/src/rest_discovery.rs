@@ -284,6 +284,14 @@ enum Classification {
 
 /// Hash of a response body after collapsing whitespace runs to single spaces and
 /// trimming, so trivial formatting differences do not defeat the soft-404 match.
+///
+/// The digest uses [`std::collections::hash_map::DefaultHasher`], whose output is
+/// **not** guaranteed stable across Rust versions or even recompilations. That is
+/// safe here because a baseline and the candidate responses it is compared against
+/// are always hashed within the same process during one scan run. This value MUST
+/// NOT be persisted or cached and then compared against a hash produced by a later
+/// run — it would silently fail to match. Reach for a stable digest (e.g. SHA-256)
+/// before introducing any cross-run baseline fingerprint.
 fn normalized_body_hash(body: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let text = String::from_utf8_lossy(body);

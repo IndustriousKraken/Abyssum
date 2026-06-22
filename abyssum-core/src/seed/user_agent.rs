@@ -35,6 +35,7 @@ use super::store::ReferenceStore;
 /// - [`UserAgentRotation::PerScan`] — the first call pins one identity and every
 ///   later call returns it, so a single scan presents one stable browser
 ///   identity. Build a fresh source per scan to rotate *between* scans.
+#[derive(Debug)]
 pub struct RotatingUserAgent {
     /// The realistic identities to rotate through (never empty; see [`new`]).
     ///
@@ -89,10 +90,18 @@ impl RotatingUserAgent {
             1 => self.pool[0].clone(),
             len => {
                 let mut last = self.last.lock().unwrap();
-                let mut idx = rand::thread_rng().gen_range(0..len);
-                if Some(idx) == *last {
-                    idx = (idx + 1) % len;
-                }
+                let mut rng = rand::thread_rng();
+                // Rejection-sample so every identity *other than* the immediately
+                // previous one is equally likely. A deterministic `(idx + 1) % len`
+                // shift on collision would bias index `(last + 1) % len` to roughly
+                // twice the others; for a small realistic pool that skew is
+                // measurable, so we draw again instead.
+                let idx = loop {
+                    let candidate = rng.gen_range(0..len);
+                    if Some(candidate) != *last {
+                        break candidate;
+                    }
+                };
                 *last = Some(idx);
                 self.pool[idx].clone()
             }
