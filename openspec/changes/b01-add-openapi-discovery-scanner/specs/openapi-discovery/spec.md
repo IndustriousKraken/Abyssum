@@ -5,7 +5,10 @@
 ### Requirement: OpenAPI Spec Document Discovery
 The OpenAPI discovery scanner SHALL probe a target's base URL against a curated set of
 common OpenAPI/Swagger document locations and report a finding when a valid spec document
-is served.
+is served. The set of candidate locations SHALL be loaded from the seeded reference-data
+store via named lookup (using the list named `openapi-discovery-paths`), so that the
+curated paths share one authoritative source with other scanners. A lookup that returns no
+entries SHALL result in zero probes rather than a failure.
 
 #### Scenario: Discovers a published spec document
 - **GIVEN** a target that serves an OpenAPI or Swagger document at one of the candidate
@@ -50,14 +53,14 @@ structure and include them in the finding as evidence.
 #### Scenario: Documented endpoints become evidence
 - **GIVEN** a discovered spec that documents one or more API paths
 - **WHEN** the scanner reports the finding
-- **THEN** the finding evidence SHALL list the documented endpoints
+- **THEN** the finding evidence SHALL list the documented endpoints that have not already been attributed to a prior finding's evidence
 - **AND** each documented path SHALL be expressed relative to the target base URL
 
 #### Scenario: Endpoints de-duplicated across specs
 - **GIVEN** more than one valid spec is discovered on the target documenting an overlapping
   path
-- **WHEN** the scanner reports the finding
-- **THEN** the overlapping endpoint SHALL appear only once in the evidence
+- **WHEN** the scanner reports findings
+- **THEN** the overlapping endpoint SHALL appear in the evidence of at most one finding
 
 ### Requirement: Pacing And Cancellation Compliance
 The scanner SHALL issue requests through the shared scan engine so that request pacing,
