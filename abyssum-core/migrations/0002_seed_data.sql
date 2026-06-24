@@ -4,9 +4,12 @@
 -- queryable and extensible at runtime, while still shipping embedded in the
 -- binary and seeded on first run. Seeding is idempotent, keyed by the natural
 -- identity captured in the UNIQUE constraints below (list name + value; UA
--- value), so re-running tops up only the missing rows -- there is no
--- content-hash or version check. This file is additive over 0001 and is applied
--- on the same `connect` path as the persistence schema.
+-- value): re-running creates no duplicates, and an `ON CONFLICT DO UPDATE` on the
+-- non-identity metadata (a wordlist entry's label/position; a UA's
+-- category/realistic) refreshes an existing row to the current bundled value
+-- rather than leaving it stale -- there is no content-hash or version check. This
+-- file is additive over 0001 and is applied on the same `connect` path as the
+-- persistence schema.
 
 CREATE TABLE wordlists (
     name TEXT PRIMARY KEY              -- e.g. 'rest_endpoints', 'graphql_queries'

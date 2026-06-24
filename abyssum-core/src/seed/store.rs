@@ -11,7 +11,7 @@
 //! [`DatabaseManager`]: crate::persistence::DatabaseManager
 
 use sqlx::sqlite::SqlitePool;
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 
 use crate::error::{db_err, Result};
 
@@ -51,63 +51,27 @@ impl ReferenceStore {
         Self { pool }
     }
 
-    /// Seed the store from the bundled assets, **idempotently**.
+    /// Seed the store from the bundled assets, **idempotently** and **atomically**.
     ///
     /// Keyed by natural identity (list name + value for wordlist entries; value
-    /// for User-Agents), so it always tops up only the missing rows — there is no
-    /// content-hash check or version stamp. Running it against a fully populated
-    /// store is a no-op; running it against a partially populated one inserts
-    /// exactly what is absent. Re-seeding never creates duplicates.
+    /// for User-Agents), so re-seeding never creates duplicates — there is no
+    /// content-hash check or version stamp. On a conflict the row's non-identity
+    /// metadata (a wordlist entry's `label`/`position`; a User-Agent's
+    /// `category`/`realistic`) is refreshed to the current bundled value via
+    /// `ON CONFLICT DO UPDATE`, so a later asset revision that moves or relabels an
+    /// existing entry is reflected on the next seed rather than leaving the old row
+    /// stale. Running it against a fully populated, unchanged store still touches
+    /// no row counts.
+    ///
+    /// The wordlists and the User-Agent pool are seeded inside a **single**
+    /// transaction, so a failure partway through rolls the whole seed back rather
+    /// than leaving the store half-populated. (Seeding is idempotent, so the next
+    /// `connect` would also recover — but one transaction avoids the intermediate
+    /// state entirely.)
     pub async fn seed(&self) -> Result<()> {
-        self.seed_wordlists().await?;
-        self.seed_user_agents().await?;
-        Ok(())
-    }
-
-    /// Seed every bundled wordlist and its entries in one transaction.
-    async fn seed_wordlists(&self) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        for asset in assets::WORDLISTS {
-            // The list row must exist before its entries (FK), and `OR IGNORE`
-            // keeps re-seeding a no-op.
-            sqlx::query("INSERT OR IGNORE INTO wordlists (name) VALUES (?)")
-                .bind(asset.name)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
-
-            for (position, entry) in assets::parse_wordlist(asset).into_iter().enumerate() {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO wordlist_entries (list_name, value, label, position) \
-                     VALUES (?, ?, ?, ?)",
-                )
-                .bind(asset.name)
-                .bind(entry.value)
-                .bind(entry.label)
-                .bind(position as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
-            }
-        }
-        tx.commit().await.map_err(db_err)?;
-        Ok(())
-    }
-
-    /// Seed the User-Agent pool in one transaction, keyed by value.
-    async fn seed_user_agents(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
-        for ua in assets::parse_user_agents() {
-            sqlx::query(
-                "INSERT OR IGNORE INTO user_agents (value, category, realistic) VALUES (?, ?, ?)",
-            )
-            .bind(ua.value)
-            .bind(ua.category)
-            .bind(ua.realistic)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
-        }
+        seed_wordlists(&mut tx).await?;
+        seed_user_agents(&mut tx).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
@@ -180,4 +144,67 @@ impl ReferenceStore {
             .map(|row| row.try_get("value").map_err(db_err))
             .collect()
     }
+}
+
+/// Seed every bundled wordlist and its entries within the caller's transaction
+/// (see [`ReferenceStore::seed`]).
+///
+/// The list row is created first so the entries' foreign key resolves. Each entry
+/// upserts on its `(list_name, value)` identity: a new entry is inserted, while an
+/// existing one has its `label`/`position` refreshed to the current bundled value
+/// so a later asset revision is not left stale.
+async fn seed_wordlists(tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
+    for asset in assets::WORDLISTS {
+        // The list row only carries its name (its identity), so there is nothing
+        // to refresh on conflict — `OR IGNORE` keeps re-seeding a no-op.
+        sqlx::query("INSERT OR IGNORE INTO wordlists (name) VALUES (?)")
+            .bind(asset.name)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+
+        for (position, entry) in assets::parse_wordlist(asset).into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO wordlist_entries (list_name, value, label, position) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(list_name, value) DO UPDATE SET \
+                   label    = excluded.label, \
+                   position = excluded.position",
+            )
+            .bind(asset.name)
+            .bind(entry.value)
+            .bind(entry.label)
+            .bind(position as i64)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Seed the User-Agent pool within the caller's transaction, keyed by value (see
+/// [`ReferenceStore::seed`]).
+///
+/// Each User-Agent upserts on its `value` identity: a new one is inserted, while
+/// an existing one has its `category`/`realistic` classification refreshed to the
+/// current bundled value. Keeping `realistic` current matters for stealth — a UA
+/// re-classified out of the realistic pool in a later asset revision must actually
+/// leave the default rotation rather than linger on a stale flag.
+async fn seed_user_agents(tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
+    for ua in assets::parse_user_agents() {
+        sqlx::query(
+            "INSERT INTO user_agents (value, category, realistic) VALUES (?, ?, ?) \
+             ON CONFLICT(value) DO UPDATE SET \
+               category  = excluded.category, \
+               realistic = excluded.realistic",
+        )
+        .bind(ua.value)
+        .bind(ua.category)
+        .bind(ua.realistic)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+    Ok(())
 }
