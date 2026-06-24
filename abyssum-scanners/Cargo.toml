@@ -1,6 +1,6 @@
 [package]
 name = "abyssum-scanners"
-description = "Abyssum scanner implementations (populated in later changes)."
+description = "Abyssum scanner implementations (REST discovery, and the siblings that follow)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,27 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The shared scanner contract, scan context, finding/target types, and the
+# reference-data store the scanner reads its wordlists from.
+abyssum-core = { workspace = true }
+# Object-safe async `BaseScanner` impl.
+async-trait = { workspace = true }
+# Joining candidate paths onto the target origin.
+url = { workspace = true }
+# Structured finding evidence.
+serde_json = { workspace = true }
+# Random unlikely path for the soft-404 baseline probe.
+uuid = { workspace = true }
+# Naming the `reqwest::Response` returned by `ScanContext::send` and reading its
+# status / headers / body (the client itself is engine-owned; never constructed here).
+reqwest = { workspace = true }
+# Scanner-internal diagnostics.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Async test runtime + a hand-rolled local mock HTTP server (no real targets).
+tokio = { workspace = true, features = ["full"] }
+# Cancellation token for the direct-scan cancellation/pacing tests.
+tokio-util = { workspace = true }
+# A temp on-disk SQLite store for the wordlist-loading integration test.
+tempfile = { workspace = true }

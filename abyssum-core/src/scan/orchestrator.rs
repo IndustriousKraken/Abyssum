@@ -27,11 +27,12 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::rate_limiter::RateLimiter;
 
-use super::context::{Credential, ScanContext, SingleUserAgent, UserAgentSource};
+use super::context::{Credential, ScanContext, UserAgentSource};
 use super::progress::{ProgressCallback, ProgressUpdate};
 use super::registry::ScannerRegistry;
 use super::session::{ScanSession, SessionStatus};
 use super::target::Target;
+use crate::seed::RotatingUserAgent;
 
 /// Capacity of the orchestrator's progress broadcast. Generous so brief
 /// subscriber stalls do not drop updates under normal scan volumes.
@@ -102,15 +103,33 @@ pub struct Orchestrator {
 impl Orchestrator {
     /// Build an orchestrator from the config and a populated registry. The shared
     /// rate limiter is derived from `config.scanning`, and the User-Agent source
-    /// defaults to the single-identity source (`add-seed-data` swaps in the pool).
+    /// defaults to the **rotating, realistic-by-default** pool: every outbound
+    /// request presents a realistic browser/mobile identity (varied per the
+    /// configured `scanning.user_agent_rotation`), never a scanner-announcing one,
+    /// so default scans blend in rather than tripping a basic IDS/IPS (see
+    /// `add-seed-data` and the Design Philosophy in `project.md`).
+    ///
+    /// The default draws on the bundled realistic identities — content-identical
+    /// to the seeded `realistic` subset and available without a database. A caller
+    /// holding a seeded store can swap in the store-backed (runtime-extensible)
+    /// pool by passing [`RotatingUserAgent::from_store`] to
+    /// [`with_user_agent_source`](Orchestrator::with_user_agent_source); an
+    /// explicit, fixed identity goes through
+    /// [`SingleUserAgent`](crate::scan::SingleUserAgent).
     pub fn new(config: Arc<Config>, registry: ScannerRegistry) -> Self {
         let rate_limiter = RateLimiter::from_config(&config.scanning);
         let (progress_tx, _) = broadcast::channel(PROGRESS_CHANNEL_CAPACITY);
+        // An empty explicit pool makes `RotatingUserAgent` fall back to the
+        // bundled realistic identities, so the blend-in default needs no DB.
+        let ua_source: Arc<dyn UserAgentSource> = Arc::new(RotatingUserAgent::new(
+            Vec::new(),
+            config.scanning.user_agent_rotation,
+        ));
         Self {
             config,
             registry: Arc::new(registry),
             rate_limiter,
-            ua_source: Arc::new(SingleUserAgent::default()),
+            ua_source,
             http: reqwest::Client::new(),
             credential: None,
             progress_tx,
@@ -362,5 +381,36 @@ impl Orchestrator {
                 callback(update);
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default orchestrator (no explicit User-Agent override) must present a
+    /// realistic, rotating identity rather than the scanner-announcing default —
+    /// this is the path every surface builds, so it is where the seed-data
+    /// "Default requests blend in" and "User-Agent varies across requests"
+    /// scenarios are satisfied.
+    #[test]
+    fn default_user_agent_source_blends_in_and_rotates() {
+        let config = Arc::new(Config::default());
+        let registry = ScannerRegistry::new(config.clone());
+        let orchestrator = Orchestrator::new(config, registry);
+
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let ua = orchestrator.ua_source.next_user_agent();
+            assert!(
+                !ua.contains("Abyssum"),
+                "default scan traffic announced the scanner: {ua}"
+            );
+            seen.insert(ua);
+        }
+        assert!(
+            seen.len() > 1,
+            "default User-Agent never varied across many requests"
+        );
     }
 }

@@ -74,6 +74,41 @@ pub struct ScanningConfig {
     pub max_delay: f64,
     /// Maximum number of in-flight requests. Finite and modest by default.
     pub max_concurrency: usize,
+    /// How often the engine's rotating User-Agent changes. Per-request by default
+    /// (every outbound request may present a fresh realistic identity); per-scan
+    /// pins one identity for the duration of a scan. See `add-seed-data`.
+    pub user_agent_rotation: UserAgentRotation,
+}
+
+/// Granularity of the engine's default User-Agent rotation.
+///
+/// The default rotation pool is the realistic (browser/mobile) subset of the
+/// seeded User-Agent pool; this key governs *how often* the presented identity
+/// changes, not *which* pool it is drawn from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserAgentRotation {
+    /// Pick a fresh identity for every outbound request (the default). Maximizes
+    /// the blend-in posture across a scan's many requests.
+    #[default]
+    PerRequest,
+    /// Pin one identity for the lifetime of a scan, presenting a single stable
+    /// browser identity to the target (more like one ordinary client).
+    PerScan,
+}
+
+impl std::str::FromStr for UserAgentRotation {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "per-request" | "request" => Ok(Self::PerRequest),
+            "per-scan" | "scan" => Ok(Self::PerScan),
+            other => Err(format!(
+                "expected 'per-request' or 'per-scan', got {other:?}"
+            )),
+        }
+    }
 }
 
 /// Logging configuration.
@@ -108,6 +143,7 @@ impl Default for ScanningConfig {
             min_delay: 1.0,
             max_delay: 3.0,
             max_concurrency: 4,
+            user_agent_rotation: UserAgentRotation::default(),
         }
     }
 }
@@ -178,6 +214,10 @@ impl Config {
         }
         if let Some(v) = get_env("ABYSSUM_SCANNING_MAX_CONCURRENCY") {
             self.scanning.max_concurrency = parse_env("ABYSSUM_SCANNING_MAX_CONCURRENCY", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION") {
+            self.scanning.user_agent_rotation =
+                parse_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION", &v)?;
         }
         // Log level: `ABYSSUM_LOG` is the documented short form (see design.md);
         // `ABYSSUM_LOG_LEVEL` follows the sectioned naming. `ABYSSUM_LOG` wins.
@@ -323,6 +363,40 @@ mod tests {
         let env = env_of(&[("ABYSSUM_LOG", "trace")]);
         let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
         assert_eq!(cfg.log.level, "trace");
+    }
+
+    #[test]
+    fn user_agent_rotation_defaults_to_per_request() {
+        assert_eq!(
+            Config::default().scanning.user_agent_rotation,
+            UserAgentRotation::PerRequest
+        );
+    }
+
+    #[test]
+    fn user_agent_rotation_parses_from_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "scanning:\n  user_agent_rotation: per-scan\n").unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert_eq!(cfg.scanning.user_agent_rotation, UserAgentRotation::PerScan);
+        // Sibling pacing keys keep their conservative defaults.
+        assert_eq!(cfg.scanning.min_delay, 1.0);
+    }
+
+    #[test]
+    fn user_agent_rotation_env_override() {
+        let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "per-scan")]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.scanning.user_agent_rotation, UserAgentRotation::PerScan);
+    }
+
+    #[test]
+    fn invalid_user_agent_rotation_is_a_config_error() {
+        let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "hourly")]);
+        let err = Config::load_from("/no/such/file.yaml", env).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
     }
 
     #[test]

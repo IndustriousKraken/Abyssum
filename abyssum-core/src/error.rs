@@ -45,6 +45,12 @@ pub enum Error {
     #[error("scan cancelled")]
     Cancelled,
 
+    /// A persistence operation failed: opening the store, running a migration,
+    /// (de)serializing a stored field, or executing a query. Added by
+    /// `add-result-persistence` (a03); the error model's doc anticipates this.
+    #[error("database error: {0}")]
+    Database(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),
@@ -52,6 +58,17 @@ pub enum Error {
 
 /// Convenience alias for fallible operations across Abyssum.
 pub type Result<T> = StdResult<T, Error>;
+
+/// Wrap any displayable error (sqlx, serde_json, uuid, …) as [`Error::Database`].
+///
+/// The single home for mapping a storage-layer failure onto the [`Database`]
+/// variant, shared by the persistence and reference-data stores so the
+/// error-wrapping behaviour lives in one place.
+///
+/// [`Database`]: Error::Database
+pub(crate) fn db_err<E: std::fmt::Display>(err: E) -> Error {
+    Error::Database(err.to_string())
+}
 
 #[cfg(test)]
 mod tests {
