@@ -3,12 +3,15 @@
 ## ADDED Requirements
 
 ### Requirement: Arbitrary HTTP Request Dispatch
-The custom requests tool SHALL send exactly one HTTP request per invocation using an
-operator-chosen method, target URL, custom headers, and an optional request body, and SHALL
-capture the full response for inspection.
+The custom requests tool SHALL send one initial HTTP request per invocation using an
+operator-chosen method, target URL, custom headers, an optional request body, and an
+optional follow_redirects flag (default: false); when follow_redirects is true it SHALL
+also follow redirect hops up to a configured limit; and it SHALL capture the full response
+for inspection.
 
 #### Scenario: Sends a request with the chosen method and headers
-- **GIVEN** a target URL, a chosen HTTP method, and one or more custom headers
+- **GIVEN** a target URL, a chosen HTTP method, one or more custom headers, and
+  follow_redirects set to false (or omitted)
 - **WHEN** the operator invokes the tool
 - **THEN** it SHALL issue a single request to that URL using the chosen method and headers
 - **AND** it SHALL capture the response status, response headers, response body, and the
@@ -43,13 +46,22 @@ capture the full response for inspection.
 ### Requirement: Optional Bearer And Cookie Authentication
 The tool SHALL support attaching a bearer token and/or session cookies to a request, where
 each is independent and optional, and SHALL send a request with no authentication when
-neither is supplied.
+neither is supplied. When a bearer token is supplied alongside custom headers that include
+an Authorization header, the bearer token SHALL take precedence and the custom Authorization
+header SHALL be ignored.
 
 #### Scenario: Bearer token attached as authorization
 - **GIVEN** an operator-supplied bearer token
 - **WHEN** the tool sends the request
 - **THEN** the request SHALL carry an authorization header presenting that token as a bearer
   credential
+
+#### Scenario: Bearer token supersedes a custom Authorization header
+- **GIVEN** an operator-supplied bearer token and a custom-headers input that also contains
+  an Authorization header
+- **WHEN** the tool sends the request
+- **THEN** the request SHALL carry the Authorization header derived from the bearer token
+- **AND** the custom Authorization header SHALL be omitted
 
 #### Scenario: Session cookies attached
 - **GIVEN** an operator-supplied cookie string
@@ -93,10 +105,27 @@ that guide manual follow-up, without classifying them as confirmed vulnerabiliti
 - **WHEN** the tool analyzes the response
 - **THEN** it SHALL surface no signals
 
+### Requirement: Rate-Limiting Layer Participation
+The custom requests tool SHALL route its outbound request through the shared rate-limiting
+layer so that per-domain pacing and backoff constraints are respected, exactly as scanner
+requests are. This keeps the tool consistent with the project's infrastructure-respect
+philosophy and prevents it from becoming a scripted DoS primitive.
+
+#### Scenario: Subsequent requests to the same domain are paced
+- **GIVEN** a target domain that has already been requested in the current session
+- **WHEN** the operator invokes the tool for that domain
+- **THEN** the shared rate-limiting layer SHALL apply the configured per-domain pacing delay
+  before the request is sent
+
+#### Scenario: First request to a domain is not artificially delayed
+- **GIVEN** a target domain that has not been requested before in the current session
+- **WHEN** the operator invokes the tool for that domain
+- **THEN** no artificial pacing delay SHALL be applied
+
 ### Requirement: Shared Surface And Output Formats
 The tool SHALL be usable identically from the command-line and web surfaces from one shared
-implementation, and SHALL render its outcome in both a human-readable form and a structured
-JSON form.
+implementation, and SHALL render its outcome in an operator-selected form: either
+human-readable or structured JSON.
 
 #### Scenario: Same outcome from either surface
 - **GIVEN** an identical request specification
