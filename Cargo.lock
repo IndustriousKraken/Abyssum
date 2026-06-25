@@ -41,6 +41,7 @@ dependencies = [
  "async-trait",
  "reqwest",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-util",

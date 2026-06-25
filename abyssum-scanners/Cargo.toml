@@ -17,6 +17,10 @@ async-trait = { workspace = true }
 url = { workspace = true }
 # Structured finding evidence.
 serde_json = { workspace = true }
+# Decoding YAML-format OpenAPI/Swagger spec documents into a generic JSON value so
+# validation and endpoint extraction stay format-agnostic (the openapi_discovery
+# scanner accepts both JSON and YAML specs).
+serde_yaml = { workspace = true }
 # Random unlikely path for the soft-404 baseline probe.
 uuid = { workspace = true }
 # Naming the `reqwest::Response` returned by `ScanContext::send` and reading its
