@@ -717,16 +717,6 @@ fn looks_like_graphql(status: u16, content_type: Option<&str>, body: &[u8]) -> b
                     return true;
                 }
             }
-            if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
-                if errors.iter().any(|e| {
-                    e.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(mentions_graphql_error)
-                        .unwrap_or(false)
-                }) {
-                    return true;
-                }
-            }
         }
     }
 
