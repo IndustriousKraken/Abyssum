@@ -39,7 +39,10 @@ pub static WORDLISTS: &[WordlistAsset] = &[
         labeled: false,
     },
     WordlistAsset {
-        name: "openapi_paths",
+        // The OpenAPI discovery scanner (b01) loads this list by the name its spec
+        // mandates — `openapi-discovery-paths` — so the curated locations share one
+        // authoritative source. The bundled source file keeps its original name.
+        name: "openapi-discovery-paths",
         raw: include_str!("../../../assets/seed/wordlists/openapi_paths.txt"),
         labeled: false,
     },

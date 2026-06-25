@@ -62,6 +62,22 @@ impl UserAgentSource for SingleUserAgent {
     }
 }
 
+/// Build the engine's HTTP client with the scanner-appropriate policy.
+///
+/// Redirects are **not** auto-followed: a scanner observes a 3xx and its `Location`
+/// directly rather than silently chasing it. A redirect-aware scanner (BAC follows
+/// a sensitive-to-sensitive redirect once, on the same host, through the paced
+/// `send`) needs to see the redirect, and silently chasing one could otherwise
+/// carry a probe to an unintended host or multiply requests outside the per-domain
+/// pacing accounting. The build uses only static settings, so it cannot fail in
+/// practice; the fallback keeps this total regardless.
+pub(crate) fn build_engine_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// An optional credential attached to outbound requests: a bearer token and/or a
 /// cookie. CORS attaches one; BAC/IDOR can run with it stripped to compare.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +126,13 @@ pub struct RequestSpec {
     pub headers: Vec<(String, String)>,
     /// Optional request body.
     pub body: Option<Vec<u8>>,
+    /// When `true`, the context's attached [`Credential`] is **not** applied to
+    /// this request — no bearer token, no `Cookie`. A scanner that probes whether
+    /// an endpoint is reachable *without* authentication (BAC/IDOR) sets this so a
+    /// positive result reflects access available to an anonymous caller, even when
+    /// the scan is otherwise configured with a credential. Pacing, the User-Agent,
+    /// cancellation, and progress are unaffected — only the credential is omitted.
+    pub omit_credential: bool,
 }
 
 impl RequestSpec {
@@ -125,6 +148,7 @@ impl RequestSpec {
             url,
             headers: Vec::new(),
             body: None,
+            omit_credential: false,
         }
     }
 
@@ -137,6 +161,13 @@ impl RequestSpec {
     /// Set the body (builder-style).
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = Some(body.into());
+        self
+    }
+
+    /// Send this request **without** the context's attached credential
+    /// (builder-style). See [`omit_credential`](Self::omit_credential).
+    pub fn without_credential(mut self) -> Self {
+        self.omit_credential = true;
         self
     }
 }
@@ -170,7 +201,7 @@ impl ScanContext {
             config,
             rate_limiter,
             ua_source,
-            http: reqwest::Client::new(),
+            http: build_engine_http_client(),
             progress: None,
             cancel,
             auth: None,
@@ -266,12 +297,16 @@ impl ScanContext {
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
-        if let Some(credential) = &self.auth {
-            if let Some(bearer) = &credential.bearer {
-                builder = builder.bearer_auth(bearer);
-            }
-            if let Some(cookie) = &credential.cookie {
-                builder = builder.header(COOKIE, cookie);
+        // Attach the context credential unless this request explicitly opts out
+        // (a BAC/IDOR probe that must reach the target as an anonymous caller).
+        if !request.omit_credential {
+            if let Some(credential) = &self.auth {
+                if let Some(bearer) = &credential.bearer {
+                    builder = builder.bearer_auth(bearer);
+                }
+                if let Some(cookie) = &credential.cookie {
+                    builder = builder.header(COOKIE, cookie);
+                }
             }
         }
         if let Some(body) = request.body {
@@ -319,6 +354,15 @@ mod tests {
     fn credential_constructors() {
         assert_eq!(Credential::bearer("t").bearer.as_deref(), Some("t"));
         assert_eq!(Credential::cookie("c").cookie.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn request_spec_credential_opt_out_defaults_off() {
+        let url = Url::parse("https://example.com/admin").unwrap();
+        // By default a request carries the context credential.
+        assert!(!RequestSpec::get(url.clone()).omit_credential);
+        // A BAC/IDOR probe opts out explicitly.
+        assert!(RequestSpec::get(url).without_credential().omit_credential);
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::rate_limiter::RateLimiter;
 
-use super::context::{Credential, ScanContext, UserAgentSource};
+use super::context::{build_engine_http_client, Credential, ScanContext, UserAgentSource};
 use super::progress::{ProgressCallback, ProgressUpdate};
 use super::registry::ScannerRegistry;
 use super::session::{ScanSession, SessionStatus};
@@ -130,7 +130,7 @@ impl Orchestrator {
             registry: Arc::new(registry),
             rate_limiter,
             ua_source,
-            http: reqwest::Client::new(),
+            http: build_engine_http_client(),
             credential: None,
             progress_tx,
             active: Mutex::new(HashMap::new()),
