@@ -180,9 +180,10 @@ impl DataClass {
 }
 
 /// The sensitive-field table: each `(needle, class, label)` flags `class` when
-/// `needle` appears (case-insensitive) in the body, recording `label` as a detected
-/// sensitive field. The set is a tunable default — the observable contract is the
-/// data class it yields, not the exact strings.
+/// `needle` matches an object key (for a JSON body) — or appears anywhere in a
+/// non-JSON body — recording `label` as a detected sensitive field. The set is a
+/// tunable default — the observable contract is the data class it yields, not the
+/// exact strings.
 const SENSITIVE_FIELDS: &[(&str, DataClass, &str)] = &[
     ("password", DataClass::Credentials, "password"),
     ("passwd", DataClass::Credentials, "password"),
@@ -805,55 +806,83 @@ fn normalized_len(body: &[u8]) -> usize {
         .len()
 }
 
-/// The set of scalar leaf values (strings, numbers, bools, null) in a JSON value,
-/// tagged by kind so `1` (number) and `"1"` (string) do not collide.
+/// The set of scalar leaf values in a JSON value, each tagged by its key path and
+/// kind so that `1` (number) and `"1"` (string) do not collide, and two objects
+/// carrying the same values under *different* keys (`{"name":"a","role":"b"}` vs
+/// `{"name":"b","role":"a"}`) produce different sets — preserving the structural
+/// context a flat value-set would discard. Array elements share their parent's path
+/// (without an index) so reordering an array's elements alone is not a difference.
 fn scalar_leaves(value: &Value) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    collect_scalar_leaves(value, &mut out);
+    collect_scalar_leaves(value, "", &mut out);
     out
 }
 
-fn collect_scalar_leaves(value: &Value, out: &mut BTreeSet<String>) {
+fn collect_scalar_leaves(value: &Value, path: &str, out: &mut BTreeSet<String>) {
     match value {
         Value::Null => {
-            out.insert("null".to_string());
+            out.insert(format!("{path}=null"));
         }
         Value::Bool(b) => {
-            out.insert(format!("b:{b}"));
+            out.insert(format!("{path}=b:{b}"));
         }
         Value::Number(n) => {
-            out.insert(format!("n:{n}"));
+            out.insert(format!("{path}=n:{n}"));
         }
         Value::String(s) => {
-            out.insert(format!("s:{s}"));
+            out.insert(format!("{path}=s:{s}"));
         }
         Value::Array(items) => {
+            let child = format!("{path}[]");
             for item in items {
-                collect_scalar_leaves(item, out);
+                collect_scalar_leaves(item, &child, out);
             }
         }
         Value::Object(map) => {
-            for nested in map.values() {
-                collect_scalar_leaves(nested, out);
+            for (key, nested) in map {
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_scalar_leaves(nested, &child, out);
             }
         }
     }
 }
 
 /// Classify the exposed-data class of a confirmed body and list the sensitive fields
-/// detected. A body with no sensitive fields that still looks like a structured
-/// record reads as user-shaped data (medium); otherwise low.
+/// detected. For a JSON body the sensitive-field needles are matched against object
+/// *keys* by whole word component, so a needle that appears only inside a string
+/// value, in surrounding free text, or embedded in an unrelated word (`secret` in
+/// `secretary`) does not inflate severity, and a boolean preference flag such as
+/// `email_notifications` is treated as a setting rather than exposed data. A
+/// non-JSON body falls back to a whole-body substring scan. A body with no sensitive
+/// fields that still looks like a structured record reads as user-shaped data
+/// (medium); otherwise low.
+///
+/// Matching the key's word components (rather than an exact key) still flags
+/// compound real fields (`user_password`, `billing_address`); a residual class of
+/// keys that reuse a sensitive word as a qualifier with a non-boolean value
+/// (`ip_address`, `token_expiry`) can still match — an accepted v1 trade-off, since
+/// the finding itself is already confirmed and only its severity is affected.
 fn classify_body(response: &ProbeResponse) -> (DataClass, Vec<String>) {
     let mut class = DataClass::None;
     let mut fields: Vec<String> = Vec::new();
 
     if !response.truncated {
-        let lower = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
-        for (needle, needle_class, label) in SENSITIVE_FIELDS {
-            if lower.contains(needle) {
-                class = class.max(*needle_class);
-                if !fields.iter().any(|f| f == label) {
-                    fields.push(label.to_string());
+        match serde_json::from_slice::<Value>(&response.body) {
+            // JSON body: match needles against object keys only, so a needle inside
+            // a value or in free text cannot inflate severity.
+            Ok(value) => collect_sensitive_keys(&value, &mut class, &mut fields),
+            // Non-JSON body: fall back to a whole-body substring scan.
+            Err(_) => {
+                let lower = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
+                for (needle, needle_class, label) in SENSITIVE_FIELDS {
+                    if lower.contains(needle) {
+                        class = class.max(*needle_class);
+                        push_field(&mut fields, label);
+                    }
                 }
             }
         }
@@ -864,6 +893,89 @@ fn classify_body(response: &ProbeResponse) -> (DataClass, Vec<String>) {
     }
 
     (class, fields)
+}
+
+/// Walk a JSON value and classify each object key against [`SENSITIVE_FIELDS`],
+/// raising `class` and recording each matched label. A key whose value is a plain
+/// boolean is treated as a preference flag (e.g. `email_notifications: true`) rather
+/// than exposed sensitive data, and is skipped.
+fn collect_sensitive_keys(value: &Value, class: &mut DataClass, fields: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if !nested.is_boolean() {
+                    classify_key(key, class, fields);
+                }
+                collect_sensitive_keys(nested, class, fields);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_sensitive_keys(item, class, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Match a single object `key` against the sensitive-field table by whole word
+/// component, raising `class` and recording the matched label for each hit.
+fn classify_key(key: &str, class: &mut DataClass, fields: &mut Vec<String>) {
+    let components = key_components(key);
+    for (needle, needle_class, label) in SENSITIVE_FIELDS {
+        if needle_matches_components(needle, &components) {
+            *class = (*class).max(*needle_class);
+            push_field(fields, label);
+        }
+    }
+}
+
+/// Append `label` to `fields` if not already present.
+fn push_field(fields: &mut Vec<String>, label: &str) {
+    if !fields.iter().any(|f| f == label) {
+        fields.push(label.to_string());
+    }
+}
+
+/// Split an object key into its lowercase word components, breaking on any
+/// non-alphanumeric separator (`_`, `-`, `.`) and on camelCase boundaries
+/// (`creditCard` → `credit`, `card`).
+fn key_components(key: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower_or_digit = false;
+    for c in key.chars() {
+        if c.is_ascii_alphanumeric() {
+            if c.is_ascii_uppercase() && prev_lower_or_digit && !current.is_empty() {
+                components.push(std::mem::take(&mut current));
+            }
+            current.push(c.to_ascii_lowercase());
+            prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+        } else {
+            if !current.is_empty() {
+                components.push(std::mem::take(&mut current));
+            }
+            prev_lower_or_digit = false;
+        }
+    }
+    if !current.is_empty() {
+        components.push(current);
+    }
+    components
+}
+
+/// Whether a (possibly multi-word) needle matches a key's components: a single-word
+/// needle must equal one component; a multi-word needle (`credit_card`) must appear
+/// as a contiguous run of components.
+fn needle_matches_components(needle: &str, components: &[String]) -> bool {
+    let tokens: Vec<&str> = needle.split('_').collect();
+    if tokens.len() == 1 {
+        components.iter().any(|c| c.as_str() == needle)
+    } else {
+        components
+            .windows(tokens.len())
+            .any(|window| window.iter().zip(&tokens).all(|(c, t)| c.as_str() == *t))
+    }
 }
 
 /// Whether a body parses as a JSON object or an array containing an object — a
@@ -1251,6 +1363,16 @@ mod tests {
         assert!(!differs_materially(a.as_bytes(), b.as_bytes()));
     }
 
+    #[test]
+    fn comparator_distinguishes_same_values_under_swapped_keys() {
+        // Identical scalar values but different structure (the keys are swapped):
+        // the path-aware comparator treats these as materially different, where a
+        // flat value-set would have judged them identical and missed the IDOR.
+        let baseline = r#"{"name":"alice","role":"admin"}"#;
+        let swapped = r#"{"name":"admin","role":"alice"}"#;
+        assert!(differs_materially(baseline.as_bytes(), swapped.as_bytes()));
+    }
+
     // --- Confirmation rules (task 4.3) -----------------------------------------
 
     #[test]
@@ -1308,6 +1430,75 @@ mod tests {
         let (class, _fields) = classify_body(&plain);
         assert_eq!(class, DataClass::None);
         assert_eq!(severity_of(class), Severity::Low);
+    }
+
+    #[test]
+    fn classify_body_matches_json_keys_not_values_or_flags() {
+        // A sensitive needle that appears only inside a string *value* (not a key)
+        // must not raise the data class — the prior whole-body scan flagged this as
+        // credentials and inflated the severity to critical.
+        let value_only = resp(
+            200,
+            Some("application/json"),
+            r#"{"id":2,"note":"please reset your password and rotate the api_key"}"#,
+        );
+        let (class, fields) = classify_body(&value_only);
+        assert_eq!(
+            class,
+            DataClass::UserData,
+            "a needle inside a value is not a sensitive field"
+        );
+        assert!(fields.is_empty());
+
+        // A boolean preference flag whose key reuses a sensitive word is a setting,
+        // not exposed data.
+        let flags = resp(
+            200,
+            Some("application/json"),
+            r#"{"id":2,"email_notifications":true,"token_refresh_enabled":false}"#,
+        );
+        let (class, fields) = classify_body(&flags);
+        assert_eq!(class, DataClass::UserData);
+        assert!(fields.is_empty());
+
+        // Genuine sensitive keys (including compound real fields and nested objects)
+        // are still classified by word component.
+        let real = resp(
+            200,
+            Some("application/json"),
+            r#"{"id":2,"user_password":"s3cret","contact":{"primary_email":"bob@x.io"}}"#,
+        );
+        let (class, fields) = classify_body(&real);
+        assert_eq!(class, DataClass::Credentials);
+        assert!(fields.iter().any(|f| f == "password"));
+        assert!(fields.iter().any(|f| f == "email"));
+
+        // A non-JSON body still uses the whole-body substring fallback.
+        let non_json = resp(200, Some("text/plain"), "username=bob password=hunter2");
+        let (class, fields) = classify_body(&non_json);
+        assert_eq!(class, DataClass::Credentials);
+        assert!(fields.iter().any(|f| f == "password"));
+    }
+
+    #[test]
+    fn key_components_split_on_separators_and_camelcase() {
+        assert_eq!(key_components("credit_card"), vec!["credit", "card"]);
+        assert_eq!(key_components("creditCard"), vec!["credit", "card"]);
+        assert_eq!(key_components("user-password"), vec!["user", "password"]);
+        assert_eq!(key_components("ssn"), vec!["ssn"]);
+        // A needle is matched only as a whole component, never as a bare substring.
+        assert!(needle_matches_components(
+            "secret",
+            &key_components("client_secret")
+        ));
+        assert!(!needle_matches_components(
+            "secret",
+            &key_components("secretary")
+        ));
+        assert!(needle_matches_components(
+            "credit_card",
+            &key_components("creditCardNumber")
+        ));
     }
 
     // --- Identifier harvesting (task 2.2) --------------------------------------
