@@ -1,11 +1,15 @@
 [package]
 name = "abyssum-cli"
-description = "Abyssum command-line surface (scanner subcommands arrive in later changes)."
+description = "Abyssum command-line surface: select scanners and targets, run them through the shared engine, and report findings as a table, JSON, or CSV."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+name = "abyssum_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "abyssum"
@@ -13,5 +17,12 @@ path = "src/main.rs"
 
 [dependencies]
 abyssum-core = { workspace = true }
+abyssum-scanners = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
