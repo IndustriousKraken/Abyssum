@@ -45,9 +45,11 @@ configured floor.
 #### Scenario: Pacing flags set the delay window
 - **GIVEN** minimum- and maximum-delay flags are supplied
 - **WHEN** the scan runs
-- **THEN** requests to a domain SHALL be paced within the supplied window
-- **AND** no request SHALL be issued before the supplied minimum delay has elapsed since the
-  previous request to that domain
+- **THEN** requests to a domain SHALL be paced within the supplied window, subject to the
+  configured floor — if the configured floor exceeds the supplied minimum delay, the floor
+  takes precedence and the effective minimum is the floor rather than the supplied value
+- **AND** no request SHALL be issued before the greater of the supplied minimum delay or the
+  configured floor has elapsed since the previous request to that domain
 
 #### Scenario: Log level controls verbosity
 - **GIVEN** a log-level flag set to a more verbose level
@@ -58,7 +60,8 @@ configured floor.
 - **GIVEN** a configuration file or environment sets a pacing or log value
 - **AND** a CLI flag sets a different value
 - **WHEN** the CLI runs
-- **THEN** the flag value SHALL take effect for that run
+- **THEN** the flag value SHALL take effect for that run, except that pacing values below the
+  configured floor SHALL be clamped to the floor
 
 ### Requirement: Multiple Output Formats
 The CLI SHALL render the run's findings in a human-readable table, as JSON, or as CSV,
