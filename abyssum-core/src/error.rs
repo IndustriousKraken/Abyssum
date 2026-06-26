@@ -51,6 +51,14 @@ pub enum Error {
     #[error("database error: {0}")]
     Database(String),
 
+    /// An authentication or authorization failure: bad credentials, a missing,
+    /// invalid, or expired session, a duplicate username at registration, or an
+    /// attempt to access a scan session the user neither owns nor (as admin) may
+    /// see. Added by `add-authentication` (c02). The message is deliberately
+    /// non-revealing on the login path (see `auth::AuthManager::login`).
+    #[error("authentication error: {0}")]
+    Auth(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),
