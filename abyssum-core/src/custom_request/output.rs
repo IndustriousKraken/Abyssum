@@ -81,6 +81,14 @@ impl RequestOutcome {
                     let _ = writeln!(out, "{name}: {value}");
                 }
 
+                if resp.body_truncated {
+                    let _ = writeln!(
+                        out,
+                        "Note: response exceeded the capture limit; only the first {} captured bytes were analyzed",
+                        resp.body.len()
+                    );
+                }
+
                 let (body, truncated) = resp.display_body(self.body_preview_cap);
                 if truncated {
                     let _ = writeln!(
@@ -132,6 +140,7 @@ impl RequestOutcome {
                     "headers": headers_to_json(&resp.headers),
                     "body": body,
                     "body_truncated": truncated,
+                    "body_capped": resp.body_truncated,
                 });
                 (response, Value::Null)
             }
@@ -189,6 +198,7 @@ mod tests {
                 elapsed: Duration::from_millis(42),
                 final_url: "https://api.test/users".to_string(),
                 redirect_count: 0,
+                body_truncated: false,
             }),
             signals: vec![Signal {
                 kind: SignalKind::InformationDisclosure,

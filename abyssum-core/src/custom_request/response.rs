@@ -1,11 +1,13 @@
 //! The captured response and the overall request outcome.
 //!
-//! [`CapturedResponse`] holds the full response read off the wire — status,
-//! headers, the complete body, timing, and the redirect outcome (final URL plus a
-//! hop count). The full body is retained so [`analyze`](super::analyze) can scan
-//! all of it; the rendered preview is truncated to a cap at display time
-//! ([`CapturedResponse::display_body`]) so neither output form carries an unbounded
-//! payload.
+//! [`CapturedResponse`] holds the response read off the wire — status, headers,
+//! the body, timing, and the redirect outcome (final URL plus a hop count). The
+//! body is read up to a configured byte cap (marked via
+//! [`body_truncated`](CapturedResponse::body_truncated) when the cap is hit) so a
+//! hostile or misconfigured target cannot exhaust memory; the retained body is what
+//! [`analyze`](super::analyze) scans. The rendered preview is truncated to a
+//! tighter cap at display time ([`CapturedResponse::display_body`]) so neither
+//! output form carries an unbounded payload.
 
 use std::time::Duration;
 
@@ -19,7 +21,9 @@ pub struct CapturedResponse {
     pub status: u16,
     /// Response headers, in arrival order.
     pub headers: Vec<(String, String)>,
-    /// The full response body (decoded lossily as UTF-8).
+    /// The response body (decoded lossily as UTF-8), read up to the configured
+    /// byte cap. When the cap was hit this holds only the captured prefix; see
+    /// [`body_truncated`](Self::body_truncated).
     pub body: String,
     /// Round-trip elapsed time, from just before send to body fully read.
     pub elapsed: Duration,
@@ -29,6 +33,10 @@ pub struct CapturedResponse {
     /// The number of redirects followed (`0` when redirect-following is off or the
     /// target did not redirect).
     pub redirect_count: usize,
+    /// Whether the body was truncated during the read because the response exceeded
+    /// the configured byte cap. When `true`, both the stored [`body`](Self::body)
+    /// and any analysis over it cover only the captured prefix of the response.
+    pub body_truncated: bool,
 }
 
 impl CapturedResponse {
@@ -137,6 +145,7 @@ mod tests {
             elapsed: Duration::from_millis(5),
             final_url: "https://x.test/".to_string(),
             redirect_count: 0,
+            body_truncated: false,
         }
     }
 

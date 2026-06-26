@@ -146,6 +146,7 @@ mod tests {
             elapsed: Duration::from_millis(1),
             final_url: "https://x.test/".to_string(),
             redirect_count: 0,
+            body_truncated: false,
         }
     }
 

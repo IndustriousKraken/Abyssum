@@ -16,8 +16,17 @@ use url::Url;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default cap on the rendered response-body preview (64 KB). Larger bodies are
-/// shown up to this size and marked truncated; analysis still scans the full body.
+/// shown up to this size and marked truncated; analysis still scans the full
+/// captured body (itself bounded by [`DEFAULT_MAX_BODY_BYTES`]).
 pub const DEFAULT_BODY_PREVIEW_CAP: usize = 64 * 1024;
+
+/// Default cap on the number of response-body bytes read into memory (8 MiB). A
+/// larger response is read up to this bound and marked truncated, so a hostile or
+/// misconfigured target cannot exhaust process memory with a multi-gigabyte body.
+/// This bounds both the stored body and what [`analyze`](super::analyze) scans; the
+/// rendered preview is capped separately and more tightly by
+/// [`DEFAULT_BODY_PREVIEW_CAP`].
+pub const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum redirect hops followed when `follow_redirects` is set.
 pub(crate) const MAX_REDIRECTS: usize = 10;
@@ -59,6 +68,10 @@ pub struct CustomRequestSpec {
     pub timeout: Duration,
     /// Byte cap on the rendered response-body preview.
     pub body_preview_cap: usize,
+    /// Maximum number of response-body bytes read into memory. A larger response is
+    /// truncated at this cap (and the capture marked truncated) so a single request
+    /// cannot exhaust process memory.
+    pub max_body_bytes: usize,
 }
 
 impl Default for CustomRequestSpec {
@@ -75,6 +88,7 @@ impl Default for CustomRequestSpec {
             verify_tls: true,
             timeout: DEFAULT_TIMEOUT,
             body_preview_cap: DEFAULT_BODY_PREVIEW_CAP,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
     }
 }
@@ -141,6 +155,14 @@ impl CustomRequestSpec {
     /// Set the round-trip timeout (builder-style).
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of response-body bytes read into memory
+    /// (builder-style). A larger response is truncated at this cap and the capture
+    /// is marked truncated.
+    pub fn max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
         self
     }
 

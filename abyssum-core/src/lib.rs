@@ -28,7 +28,7 @@ pub use config::{Config, UserAgentRotation};
 pub use custom_request::{
     analyze, execute as execute_custom_request, CaptureResult, CapturedResponse, CustomRequestSpec,
     OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind, DEFAULT_BODY_PREVIEW_CAP,
-    DEFAULT_TIMEOUT,
+    DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
 };
 pub use error::{Error, Result};
 pub use persistence::{

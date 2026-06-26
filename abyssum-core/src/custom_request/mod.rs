@@ -15,7 +15,8 @@
 //!   -> prepare()   normalize URL/method, fold in auth + content-type headers
 //!   -> acquire pacing for the target host (shared RateLimiter)
 //!   -> send via a per-invocation reqwest client (TLS-verify + redirect policy)
-//!   -> capture status, headers, body, timing, final URL + redirect hop count
+//!   -> capture status, headers, body (bounded by a read cap), timing, final URL
+//!      + redirect hop count
 //!   -> analyze(response)  (pure: advisory signals)
 //!   -> RequestOutcome { request echo, response|error, signals }
 //! ```
@@ -47,7 +48,10 @@ use crate::rate_limiter::{Pace, RateLimiter};
 pub use analysis::{analyze, Signal, SignalKind};
 pub use output::OutputFormat;
 pub use response::{CaptureResult, CapturedResponse, RequestOutcome};
-pub use spec::{CustomRequestSpec, PreparedRequest, DEFAULT_BODY_PREVIEW_CAP, DEFAULT_TIMEOUT};
+pub use spec::{
+    CustomRequestSpec, PreparedRequest, DEFAULT_BODY_PREVIEW_CAP, DEFAULT_MAX_BODY_BYTES,
+    DEFAULT_TIMEOUT,
+};
 
 use spec::MAX_REDIRECTS;
 
@@ -88,7 +92,7 @@ pub async fn execute(spec: &CustomRequestSpec, limiter: &RateLimiter) -> Request
         Err(err) => return RequestOutcome::failed(prepared, err, cap),
     };
 
-    match send_and_capture(&client, &prepared, &url, &redirects).await {
+    match send_and_capture(&client, &prepared, &url, &redirects, spec.max_body_bytes).await {
         Ok(response) => {
             // Feed the outcome back into the limiter so distress grows backoff and
             // clean completions decay it — exactly as the scanner path does.
@@ -149,13 +153,16 @@ fn build_client(
         .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
 
-/// Issue the prepared request and capture the full response (or the transport
-/// error). Timing spans from just before send to the body being fully read.
+/// Issue the prepared request and capture the response (or the transport error).
+/// The body is read up to `max_body_bytes` so a hostile or misconfigured target
+/// cannot exhaust memory; a larger response is captured up to the cap and marked
+/// truncated. Timing spans from just before send to the (capped) body being read.
 async fn send_and_capture(
     client: &reqwest::Client,
     prepared: &PreparedRequest,
     url: &Url,
     redirects: &Arc<AtomicUsize>,
+    max_body_bytes: usize,
 ) -> Result<CapturedResponse, String> {
     let method = reqwest::Method::from_bytes(prepared.method.as_bytes())
         .map_err(|e| format!("invalid method {:?}: {e}", prepared.method))?;
@@ -169,23 +176,32 @@ async fn send_and_capture(
     }
 
     let started = Instant::now();
-    let response = builder.send().await.map_err(|e| e.to_string())?;
+    let mut response = builder.send().await.map_err(|e| e.to_string())?;
 
     let status = response.status().as_u16();
     let final_url = response.url().to_string();
     let headers = response
         .headers()
         .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_string(),
-                value.to_str().unwrap_or_default().to_string(),
-            )
-        })
+        .map(|(name, value)| (name.as_str().to_string(), header_value_to_string(value)))
         .collect();
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+
+    // Read the body in chunks, stopping once `max_body_bytes` is reached, so a
+    // multi-gigabyte response cannot exhaust memory. The cap bounds both the stored
+    // body and what `analyze` scans; when it is hit the capture is marked truncated.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut body_truncated = false;
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let remaining = max_body_bytes.saturating_sub(buf.len());
+        if chunk.len() > remaining {
+            buf.extend_from_slice(&chunk[..remaining]);
+            body_truncated = true;
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
     let elapsed = started.elapsed();
-    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let body = String::from_utf8_lossy(&buf).into_owned();
 
     Ok(CapturedResponse {
         status,
@@ -194,7 +210,17 @@ async fn send_and_capture(
         elapsed,
         final_url,
         redirect_count: redirects.load(Ordering::Relaxed),
+        body_truncated,
     })
+}
+
+/// Decode a response header value to a `String`, preserving non-ASCII bytes
+/// lossily rather than dropping them. `HeaderValue::to_str` only succeeds for
+/// visible ASCII; mapping its failure to an empty string would silently discard a
+/// header value (e.g. an information-disclosure banner with non-ASCII bytes), so a
+/// lossy UTF-8 decode is used to keep the signal.
+fn header_value_to_string(value: &reqwest::header::HeaderValue) -> String {
+    String::from_utf8_lossy(value.as_bytes()).into_owned()
 }
 
 #[cfg(test)]
@@ -214,5 +240,25 @@ mod tests {
         assert!(outcome.error().is_some());
         // The echo still reflects the attempt.
         assert_eq!(outcome.request.method, "GET");
+    }
+
+    #[test]
+    fn header_value_to_string_preserves_non_ascii() {
+        use reqwest::header::HeaderValue;
+
+        // Visible ASCII round-trips exactly.
+        let ascii = HeaderValue::from_static("nginx/1.25.1");
+        assert_eq!(header_value_to_string(&ascii), "nginx/1.25.1");
+
+        // A valid-UTF-8 non-ASCII value (`ÿ` = 0xC3 0xBF) decodes, not dropped.
+        let utf8 = HeaderValue::from_bytes(&[0xc3, 0xbf]).unwrap();
+        assert_eq!(header_value_to_string(&utf8), "ÿ");
+
+        // An invalid-UTF-8 byte becomes the replacement char rather than an empty
+        // string, so the header is never silently lost.
+        let invalid = HeaderValue::from_bytes(&[0xff]).unwrap();
+        let decoded = header_value_to_string(&invalid);
+        assert!(!decoded.is_empty());
+        assert_eq!(decoded, "\u{FFFD}");
     }
 }

@@ -218,6 +218,8 @@ async fn send_path_delivers_request_and_captures_response() {
     assert_eq!(resp.body, r#"{"created":true}"#);
     assert_eq!(resp.redirect_count, 0);
     assert!(resp.elapsed >= Duration::ZERO);
+    // A body well under the read cap is captured whole, not marked truncated.
+    assert!(!resp.body_truncated);
 
     // The same outcome renders in both forms.
     let json = outcome.render(OutputFormat::Json);
@@ -248,6 +250,44 @@ async fn keyless_request_sends_no_auth_headers() {
     let resp = outcome.response().expect("keyless request should succeed");
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body, "pong");
+}
+
+/// A response larger than the configured read cap is captured up to the cap and
+/// marked truncated, so a hostile/misconfigured multi-gigabyte body cannot exhaust
+/// memory. The truncation is surfaced in the JSON output as `body_capped`.
+#[tokio::test]
+async fn oversized_body_is_capped_and_marked_truncated() {
+    let mock = start_mock(Reply {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        body: "x".repeat(10_000),
+    })
+    .await;
+
+    // A cap far below the 10 KB body forces truncation.
+    let spec = CustomRequestSpec::new(mock.url("/big")).max_body_bytes(16);
+    let outcome = execute(&spec, &no_pacing()).await;
+
+    let resp = outcome.response().expect("a response should be captured");
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        resp.body.len(),
+        16,
+        "body should be capped at the read limit"
+    );
+    assert!(
+        resp.body_truncated,
+        "the capped capture should be marked truncated"
+    );
+
+    // The cap is surfaced in the JSON document.
+    let doc: serde_json::Value = serde_json::from_str(&outcome.render(OutputFormat::Json)).unwrap();
+    assert_eq!(doc["response"]["body_capped"], true);
+
+    // And noted in the human form.
+    assert!(outcome
+        .render(OutputFormat::Human)
+        .contains("exceeded the capture limit"));
 }
 
 /// Task 5.6: a transport error (no listener on the port) yields an error-carrying
