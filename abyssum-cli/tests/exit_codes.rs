@@ -5,55 +5,12 @@
 //! status for invalid input (an unknown scanner id, an unparseable target) — which
 //! is rejected before any request is issued.
 
-use std::net::SocketAddr;
-use std::path::Path;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+mod common;
+use common::{spawn_cors_mock, write_config};
 
 /// Path to the built `abyssum` binary, provided by Cargo.
 fn abyssum_bin() -> &'static str {
     env!("CARGO_BIN_EXE_abyssum")
-}
-
-/// Write a config pointing the store at `db_path` with a zero pacing floor (so a
-/// local mock scan completes promptly), returning the config file's path.
-fn write_config(dir: &Path, db_path: &Path) -> std::path::PathBuf {
-    let cfg_path = dir.join("abyssum.yaml");
-    let contents = format!(
-        "database:\n  path: {db}\nscanning:\n  min_delay: 0.0\n  max_delay: 0.0\nlog:\n  level: warn\n",
-        db = db_path.display()
-    );
-    std::fs::write(&cfg_path, contents).unwrap();
-    cfg_path
-}
-
-/// A permissive-CORS mock (see `e2e.rs`); enough to drive one finding so a scan
-/// completes successfully.
-async fn spawn_cors_mock() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
-            };
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 2048];
-                let _ = socket.read(&mut buf).await;
-                let response = "HTTP/1.1 200 OK\r\n\
-                     Access-Control-Allow-Origin: *\r\n\
-                     Access-Control-Allow-Credentials: true\r\n\
-                     Content-Length: 0\r\n\
-                     Connection: close\r\n\
-                     \r\n";
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.flush().await;
-            });
-        }
-    });
-    addr
 }
 
 #[tokio::test]

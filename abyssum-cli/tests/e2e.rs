@@ -6,56 +6,11 @@
 //! stored, its findings survive reopening the store, and the table / JSON / CSV
 //! renderings all reflect the same findings (tasks 5.2 and 8.1).
 
-use std::net::SocketAddr;
-
 use abyssum_cli::{execute, render, Cli, OutputFormat};
 use abyssum_core::{DatabaseManager, Finding, SessionStatus};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
-/// Spawn a local HTTP server that answers every request with a permissive CORS
-/// policy (`Access-Control-Allow-Origin: *` + `Access-Control-Allow-Credentials:
-/// true`), which the `cors` scanner reports as a finding. Returns the bound
-/// address; the accept loop runs detached for the test's duration.
-async fn spawn_cors_mock() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
-            };
-            tokio::spawn(async move {
-                // Read the request headers (best effort — a GET carries no body).
-                let mut buf = vec![0u8; 2048];
-                let _ = socket.read(&mut buf).await;
-                let response = "HTTP/1.1 200 OK\r\n\
-                     Access-Control-Allow-Origin: *\r\n\
-                     Access-Control-Allow-Credentials: true\r\n\
-                     Content-Length: 0\r\n\
-                     Connection: close\r\n\
-                     \r\n";
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.flush().await;
-            });
-        }
-    });
-    addr
-}
-
-/// Write a config that points the store at `db_path` and drops the pacing floor to
-/// zero (an authorized local test against a mock — no need to wait), returning the
-/// config file's path.
-fn write_config(dir: &std::path::Path, db_path: &std::path::Path) -> std::path::PathBuf {
-    let cfg_path = dir.join("abyssum.yaml");
-    let contents = format!(
-        "database:\n  path: {db}\nscanning:\n  min_delay: 0.0\n  max_delay: 0.0\nlog:\n  level: warn\n",
-        db = db_path.display()
-    );
-    std::fs::write(&cfg_path, contents).unwrap();
-    cfg_path
-}
+mod common;
+use common::{spawn_cors_mock, write_config};
 
 #[tokio::test]
 async fn full_run_persists_session_and_all_formats_agree() {
