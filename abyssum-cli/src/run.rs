@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use abyssum_core::{
-    logging, Config, DatabaseManager, Orchestrator, ProgressCallback, ProgressUpdate, ScanSession,
-    ScannerRegistry, SessionStatus,
+    logging, Config, DatabaseManager, Orchestrator, ProgressCallback, ProgressKind, ProgressUpdate,
+    ScanSession, ScannerRegistry, SessionStatus,
 };
 use abyssum_scanners::register_builtins;
 use uuid::Uuid;
@@ -188,12 +188,13 @@ async fn run_to_completion(
 
 /// Build the progress callback that drains updates to the terminal as the scan
 /// runs. Orchestrator unit-level updates surface at `info`; the finer
-/// scanner-internal probe updates at `debug`. Output goes through `tracing`, so it
-/// is plain log lines when not attached to a TTY and its volume follows the chosen
-/// log level.
+/// scanner-internal probe updates at `debug`. The two are told apart by the
+/// update's [`ProgressKind`] — a structural discriminator, not the wording of the
+/// free-form message. Output goes through `tracing`, so it is plain log lines when
+/// not attached to a TTY and its volume follows the chosen log level.
 fn progress_callback() -> ProgressCallback {
-    Arc::new(|update: ProgressUpdate| {
-        if update.message.contains("units") {
+    Arc::new(|update: ProgressUpdate| match update.kind {
+        ProgressKind::Unit => {
             tracing::info!(
                 target: "abyssum::progress",
                 scanner = %update.scanner_id,
@@ -202,7 +203,8 @@ fn progress_callback() -> ProgressCallback {
                 item = update.current_item.as_deref().unwrap_or(""),
                 "scan progress",
             );
-        } else {
+        }
+        ProgressKind::ScannerInternal => {
             tracing::debug!(
                 target: "abyssum::progress",
                 scanner = %update.scanner_id,

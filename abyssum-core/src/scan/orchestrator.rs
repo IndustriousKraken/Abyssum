@@ -28,7 +28,7 @@ use crate::error::{Error, Result};
 use crate::rate_limiter::RateLimiter;
 
 use super::context::{build_engine_http_client, Credential, ScanContext, UserAgentSource};
-use super::progress::{ProgressCallback, ProgressUpdate};
+use super::progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 use super::registry::ScannerRegistry;
 use super::session::{ScanSession, SessionStatus};
 use super::target::Target;
@@ -297,11 +297,15 @@ impl Orchestrator {
                             s.completed_units += 1;
                             (s.completed_units, s.total_units)
                         };
-                        // Overall progress after each scanner-target unit.
+                        // Overall progress after each scanner-target unit. Marked
+                        // `Unit` so a consumer can tell this coarse per-unit update
+                        // apart from a scanner's fine-grained internal probes
+                        // without parsing the message text.
                         fanout(
                             ProgressUpdate::new(scanner_id.clone(), completed, total)
                                 .current_item(target.full_url().to_string())
-                                .message(format!("completed {completed}/{total} units")),
+                                .message(format!("completed {completed}/{total} units"))
+                                .kind(ProgressKind::Unit),
                         );
                     }
                 }

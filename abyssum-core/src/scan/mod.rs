@@ -33,7 +33,7 @@ pub use context::{
 };
 pub use finding::{Finding, FindingBuilder, FindingId, Severity, Status};
 pub use orchestrator::{Orchestrator, SessionHandle};
-pub use progress::{ProgressCallback, ProgressUpdate};
+pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 pub use registry::{ScannerFactory, ScannerRegistry};
 pub use scanner::BaseScanner;
 pub use session::{ScanSession, SessionProgress, SessionStatus};
