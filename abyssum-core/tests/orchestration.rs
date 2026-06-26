@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use abyssum_core::scan::BaseScanner;
 use abyssum_core::{
-    Config, Error, Finding, Orchestrator, ProgressCallback, ProgressUpdate, ScanContext,
-    ScannerRegistry, SessionStatus, Severity, Status, Target,
+    Config, Error, Finding, Orchestrator, ProgressCallback, ProgressKind, ProgressUpdate,
+    ScanContext, ScannerRegistry, SessionStatus, Severity, Status, Target,
 };
 use async_trait::async_trait;
 use tokio::sync::Notify;
@@ -186,6 +186,22 @@ async fn forwards_progress_with_tested_total_and_current() {
     assert!(updates
         .iter()
         .any(|u| u.items_completed == 2 && u.total_items == 2));
+
+    // The orchestrator's per-unit updates are tagged `Unit` and the stub's own
+    // probe updates `ScannerInternal`, so a consumer (e.g. the CLI's log-level
+    // routing) can tell the two granularities apart without parsing the message.
+    assert!(
+        updates
+            .iter()
+            .any(|u| u.kind == ProgressKind::Unit && u.message.contains("units")),
+        "the orchestrator's unit updates must be tagged ProgressKind::Unit: {updates:?}"
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|u| u.kind == ProgressKind::ScannerInternal && u.message == "probing"),
+        "the stub's internal probes must be tagged ProgressKind::ScannerInternal: {updates:?}"
+    );
 }
 
 /// Task 3.2: components can subscribe to the orchestrator's progress stream.

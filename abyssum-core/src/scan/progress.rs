@@ -5,16 +5,39 @@
 //! [`ProgressCallback`] carried in the scan context, and the orchestrator's
 //! unit-level progress ("completed 3 / 6 scanner-target units"). A surface
 //! subscribes to the orchestrator's [broadcast stream](crate::scan::Orchestrator)
-//! to render either live.
+//! to render either live, and tells the two apart by the update's
+//! [`kind`](ProgressUpdate::kind) — never by parsing the free-form message.
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// The granularity a [`ProgressUpdate`] reports.
+///
+/// Both kinds flow through the same callback and broadcast stream; this lets a
+/// consumer distinguish the orchestrator's coarse per-unit progress from a
+/// scanner's fine-grained internal probes without parsing the free-form
+/// [`message`](ProgressUpdate::message), whose wording is not a stable contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressKind {
+    /// A scanner's own internal probe progress (e.g. "tested 12 / 100 paths").
+    /// Fine-grained and emitted many times per scanner-target unit. The default,
+    /// so a scanner constructing an update via [`ProgressUpdate::new`] is this
+    /// kind without opting in.
+    #[default]
+    ScannerInternal,
+    /// The orchestrator's unit-level progress ("completed 3 / 6 scanner-target
+    /// units"), emitted once as each scanner-target unit finishes.
+    Unit,
+}
+
 /// A single progress report.
 ///
 /// `items_completed` out of `total_items` says how far along the unit of work is;
-/// `current_item` names what is being tested right now.
+/// `current_item` names what is being tested right now, and `kind` says whether
+/// this is a scanner's internal probe progress or the orchestrator's per-unit
+/// progress.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgressUpdate {
     /// The id of the scanner this update concerns (or the orchestrator's view of
@@ -30,6 +53,11 @@ pub struct ProgressUpdate {
     /// A free-form human-readable message.
     #[serde(default)]
     pub message: String,
+    /// Which granularity this update reports. A consumer routes on this rather
+    /// than parsing [`message`](Self::message), so the message text stays a
+    /// free-form display detail and not a contract.
+    #[serde(default)]
+    pub kind: ProgressKind,
 }
 
 impl ProgressUpdate {
@@ -41,6 +69,7 @@ impl ProgressUpdate {
             total_items,
             current_item: None,
             message: String::new(),
+            kind: ProgressKind::ScannerInternal,
         }
     }
 
@@ -53,6 +82,14 @@ impl ProgressUpdate {
     /// Set the human-readable message (builder-style).
     pub fn message(mut self, message: impl Into<String>) -> Self {
         self.message = message.into();
+        self
+    }
+
+    /// Set the update's granularity (builder-style). Defaults to
+    /// [`ProgressKind::ScannerInternal`]; the orchestrator marks its per-unit
+    /// updates [`ProgressKind::Unit`].
+    pub fn kind(mut self, kind: ProgressKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -90,6 +127,40 @@ mod tests {
             .message("probing");
         assert_eq!(u.current_item.as_deref(), Some("/admin"));
         assert_eq!(u.message, "probing");
+    }
+
+    #[test]
+    fn kind_defaults_to_scanner_internal_and_the_builder_overrides_it() {
+        // A scanner constructing an update is scanner-internal without opting in.
+        assert_eq!(
+            ProgressUpdate::new("s", 1, 2).kind,
+            ProgressKind::ScannerInternal
+        );
+        // The orchestrator opts a unit-level update into the coarser kind.
+        let unit = ProgressUpdate::new("s", 1, 2).kind(ProgressKind::Unit);
+        assert_eq!(unit.kind, ProgressKind::Unit);
+    }
+
+    #[test]
+    fn kind_survives_a_serde_round_trip() {
+        let u = ProgressUpdate::new("s", 2, 5).kind(ProgressKind::Unit);
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(
+            json.contains("\"kind\":\"unit\""),
+            "kind should serialize: {json}"
+        );
+        let back: ProgressUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, ProgressKind::Unit);
+    }
+
+    #[test]
+    fn kind_defaults_when_absent_from_serialized_input() {
+        // An older or minimal payload without `kind` deserializes to the default,
+        // so the discriminator is backward compatible over the broadcast stream.
+        let back: ProgressUpdate =
+            serde_json::from_str(r#"{"scanner_id":"s","items_completed":1,"total_items":2}"#)
+                .unwrap();
+        assert_eq!(back.kind, ProgressKind::ScannerInternal);
     }
 
     #[test]

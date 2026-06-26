@@ -7,8 +7,13 @@ name = "abyssum-cli"
 version = "2.0.0"
 dependencies = [
  "abyssum-core",
+ "abyssum-scanners",
  "clap",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

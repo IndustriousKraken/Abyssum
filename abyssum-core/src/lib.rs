@@ -37,8 +37,8 @@ pub use persistence::{
 pub use rate_limiter::{Pace, RateLimiter};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Method, Orchestrator,
-    ProgressCallback, ProgressUpdate, RequestSpec, ScanContext, ScanSession, ScannerFactory,
-    ScannerRegistry, SessionHandle, SessionProgress, SessionStatus, Severity, SingleUserAgent,
-    Status, Target, UserAgentSource,
+    ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanSession,
+    ScannerFactory, ScannerRegistry, SessionHandle, SessionProgress, SessionStatus, Severity,
+    SingleUserAgent, Status, Target, UserAgentSource,
 };
 pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};

@@ -1,54 +1,30 @@
 //! `abyssum` — the command-line surface.
 //!
-//! For the bootstrap change this only proves the workspace builds and links end
-//! to end: it parses arguments (exposing `--version` and `--help`), loads
-//! configuration, initializes logging, and exits cleanly. Scanner subcommands
-//! arrive in later changes (c01 onward).
+//! A thin shell over [`abyssum_cli`]: parse arguments (so `clap` serves `--help`
+//! and `--version`), run the scan end to end through the shared engine, print the
+//! rendered findings, and map the outcome to a process exit code so the CLI is
+//! safe to script. All scanning, pacing, persistence, and rendering live in the
+//! library and `abyssum-core`, so the CLI and web surfaces cannot drift.
 
 use std::process::ExitCode;
 
-use abyssum_core::{logging, Config};
+use abyssum_cli::{execute, Cli};
 use clap::Parser;
 
-/// Abyssum: a patient, stealthy API vulnerability scanner for **authorized**
-/// security testing only.
-#[derive(Debug, Parser)]
-#[command(
-    name = "abyssum",
-    version,
-    about = "Abyssum — API vulnerability scanner for authorized testing",
-    long_about = None
-)]
-struct Cli {
-    /// Path to the YAML configuration file (missing file ⇒ built-in defaults).
-    #[arg(
-        long,
-        value_name = "PATH",
-        env = "ABYSSUM_CONFIG",
-        default_value = "abyssum.yaml"
-    )]
-    config: String,
-}
-
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     // clap handles `--version` / `--help` here, printing and exiting with 0.
     let cli = Cli::parse();
 
-    let config = match Config::load(&cli.config) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("abyssum: failed to load configuration: {err}");
-            return ExitCode::FAILURE;
+    match execute(cli).await {
+        Ok(outcome) => {
+            // The rendered findings already carry a trailing newline.
+            print!("{}", outcome.rendered);
+            ExitCode::from(outcome.exit_code)
         }
-    };
-
-    logging::init(&config);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "abyssum CLI ready");
-
-    println!(
-        "abyssum {} — no scanners wired yet (subcommands arrive in later changes)",
-        env!("CARGO_PKG_VERSION")
-    );
-
-    ExitCode::SUCCESS
+        Err(err) => {
+            eprintln!("abyssum: {err}");
+            ExitCode::from(err.exit_code())
+        }
+    }
 }
