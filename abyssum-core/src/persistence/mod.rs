@@ -182,11 +182,14 @@ impl DatabaseManager {
         let targets_json = serde_json::to_string(&session.targets).map_err(db_err)?;
         let scanners_json = serde_json::to_string(&session.scanner_ids).map_err(db_err)?;
 
+        // `owner_user_id` is written only on the initial insert and deliberately
+        // left out of the `DO UPDATE` set, so a re-save can never change the
+        // owner — the ownership stamp is immutable once recorded (c02).
         sqlx::query(
             "INSERT INTO sessions \
                (session_id, status, targets_json, scanners_json, error_count, \
-                completed_units, total_units, started_at, finished_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                completed_units, total_units, started_at, finished_at, owner_user_id, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
              ON CONFLICT(session_id) DO UPDATE SET \
                status          = excluded.status, \
                targets_json    = excluded.targets_json, \
@@ -207,6 +210,7 @@ impl DatabaseManager {
         .bind(count_to_i64(session.total_units))
         .bind(session.started_at)
         .bind(session.finished_at)
+        .bind(session.owner_user_id)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -250,11 +254,42 @@ impl DatabaseManager {
     pub async fn list_sessions(&self, limit: i64, offset: i64) -> Result<Vec<ScanSession>> {
         let rows = sqlx::query(
             "SELECT session_id, status, targets_json, scanners_json, error_count, \
-                    completed_units, total_units, started_at, finished_at \
+                    completed_units, total_units, started_at, finished_at, owner_user_id \
              FROM sessions \
              ORDER BY created_at DESC, id DESC \
              LIMIT ? OFFSET ?",
         )
+        .bind(resolve_search_limit(Some(limit)))
+        .bind(offset.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        rows.iter().map(row_to_session).collect()
+    }
+
+    /// List the sessions owned by `owner_user_id`, most-recently-created first,
+    /// paged like [`list_sessions`]. This is the owner-scoped read the
+    /// authentication layer uses to show a regular user only their own sessions
+    /// (an `admin` uses the unscoped [`list_sessions`] to see all). Sessions with
+    /// no owner (CLI-initiated) are never returned here.
+    ///
+    /// [`list_sessions`]: DatabaseManager::list_sessions
+    pub async fn list_sessions_owned_by(
+        &self,
+        owner_user_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ScanSession>> {
+        let rows = sqlx::query(
+            "SELECT session_id, status, targets_json, scanners_json, error_count, \
+                    completed_units, total_units, started_at, finished_at, owner_user_id \
+             FROM sessions \
+             WHERE owner_user_id = ? \
+             ORDER BY created_at DESC, id DESC \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(owner_user_id)
         .bind(resolve_search_limit(Some(limit)))
         .bind(offset.max(0))
         .fetch_all(&self.pool)
@@ -451,7 +486,7 @@ impl DatabaseManager {
 
 /// Column list + table for selecting a full session row (without findings).
 const SESSION_COLUMNS_SELECT: &str = "SELECT session_id, status, targets_json, scanners_json, \
-     error_count, completed_units, total_units, started_at, finished_at \
+     error_count, completed_units, total_units, started_at, finished_at, owner_user_id \
      FROM sessions WHERE session_id = ?";
 
 /// Column list + table for selecting full finding rows; callers append the
@@ -654,6 +689,7 @@ fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
     let total_units: i64 = row.try_get("total_units").map_err(db_err)?;
     let started_at: Option<DateTime<Utc>> = row.try_get("started_at").map_err(db_err)?;
     let finished_at: Option<DateTime<Utc>> = row.try_get("finished_at").map_err(db_err)?;
+    let owner_user_id: Option<i64> = row.try_get("owner_user_id").map_err(db_err)?;
 
     Ok(ScanSession {
         id,
@@ -666,6 +702,7 @@ fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
         total_units: count_to_usize(total_units),
         started_at,
         finished_at,
+        owner_user_id,
     })
 }
 

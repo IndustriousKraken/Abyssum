@@ -89,6 +89,13 @@ pub struct ScanSession {
     /// When the run ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
+    /// The id of the user that owns this session, stamped once at creation and
+    /// never changed thereafter (see `add-authentication`, c02). `None` for
+    /// CLI-initiated sessions, which have no owner; the web surface sets it to the
+    /// authenticated creator. Visibility (owner-only + admin-sees-all) is enforced
+    /// in [`auth`](crate::auth) against this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<i64>,
 }
 
 impl ScanSession {
@@ -107,7 +114,17 @@ impl ScanSession {
             total_units,
             started_at: None,
             finished_at: None,
+            owner_user_id: None,
         }
+    }
+
+    /// Stamp the owning user's id (builder-style). The web surface calls this at
+    /// creation with the authenticated user's id; CLI sessions leave it unset.
+    /// Ownership is immutable once persisted — the store never overwrites it on a
+    /// re-save.
+    pub fn with_owner(mut self, owner_user_id: i64) -> Self {
+        self.owner_user_id = Some(owner_user_id);
+        self
     }
 
     /// Completion as tested-units / total-units.

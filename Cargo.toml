@@ -46,8 +46,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # Structured finding evidence.
 serde_json = "1"
 # Randomness — the rate limiter draws a fresh uniform pacing delay per request
-# (anti-fingerprinting; see a01-add-rate-limiting design.md).
+# (anti-fingerprinting; see a01-add-rate-limiting design.md). `OsRng` (a CSPRNG)
+# also generates auth session tokens and password salts (see c02 auth module).
 rand = "0.8"
+# Password hashing — Argon2id via the `password-hash` traits (see c02-add-authentication
+# design.md). The crate generates the per-password salt and emits the encoded PHC
+# string (salt + params embedded), so we never store a bare hash or manage salts.
+argon2 = "0.4"
 # Durable result storage — async SQLite via sqlx (see a03-add-result-persistence
 # design.md). `sqlite` bundles the SQLite amalgamation (no system libsqlite3
 # required); `macros` + `migrate` provide the compile-time-embedded migration set

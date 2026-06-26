@@ -414,13 +414,15 @@ async fn migrations_are_idempotent_and_preserve_data() {
     assert!(db.get_session(again.id).await.unwrap().is_some());
 
     // The migration tracking table exists and records every applied version: the
-    // initial persistence schema (0001) plus the seed-data schema (0002) added by
-    // `add-seed-data`. Re-opening re-applies neither.
+    // initial persistence schema (0001), the seed-data schema (0002) added by
+    // `add-seed-data`, and the auth schema (0003) added by `add-authentication`
+    // (users/auth_sessions + the sessions.owner_user_id column). Re-opening
+    // re-applies none of them.
     let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(applied, 2);
+    assert_eq!(applied, 3);
 }
 
 // --- 7.5 Deletion ----------------------------------------------------------

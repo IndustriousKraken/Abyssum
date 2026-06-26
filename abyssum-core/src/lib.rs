@@ -15,6 +15,7 @@
 //! cheaply-cloneable [`RateLimiter`] and shares it with every scanner through the
 //! [`ScanContext`](scan::ScanContext), so the pacing floor cannot be bypassed.
 
+pub mod auth;
 pub mod config;
 pub mod custom_request;
 pub mod error;
@@ -24,7 +25,8 @@ pub mod rate_limiter;
 pub mod scan;
 pub mod seed;
 
-pub use config::{Config, UserAgentRotation};
+pub use auth::{visible_session, visible_sessions, AuthManager, Role, User};
+pub use config::{AuthConfig, Config, UserAgentRotation};
 pub use custom_request::{
     analyze, execute as execute_custom_request, CaptureResult, CapturedResponse, CustomRequestSpec,
     OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind, DEFAULT_BODY_PREVIEW_CAP,

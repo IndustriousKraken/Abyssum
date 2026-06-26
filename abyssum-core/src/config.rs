@@ -38,6 +38,8 @@ pub struct Config {
     pub scanning: ScanningConfig,
     /// Logging verbosity.
     pub log: LogConfig,
+    /// Authentication session lifetimes.
+    pub auth: AuthConfig,
 }
 
 /// Web-surface bind settings.
@@ -111,6 +113,21 @@ impl std::str::FromStr for UserAgentRotation {
     }
 }
 
+/// Authentication session lifetimes.
+///
+/// A login session is bounded by both an absolute maximum age (a hard ceiling
+/// from creation) and an idle timeout (refreshed on each authorized use). The
+/// defaults are conservative: a session cannot outlive a day, and an unused one
+/// lapses after an hour. See `add-authentication` (c02).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Hard ceiling on a session's age, in hours, regardless of activity.
+    pub session_absolute_max_hours: u64,
+    /// Idle timeout, in minutes, refreshed on each authorized use.
+    pub session_idle_timeout_minutes: u64,
+}
+
 /// Logging configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -144,6 +161,15 @@ impl Default for ScanningConfig {
             max_delay: 3.0,
             max_concurrency: 4,
             user_agent_rotation: UserAgentRotation::default(),
+        }
+    }
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_absolute_max_hours: 24,
+            session_idle_timeout_minutes: 60,
         }
     }
 }
@@ -218,6 +244,14 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION") {
             self.scanning.user_agent_rotation =
                 parse_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS") {
+            self.auth.session_absolute_max_hours =
+                parse_env("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_IDLE_TIMEOUT_MINUTES") {
+            self.auth.session_idle_timeout_minutes =
+                parse_env("ABYSSUM_AUTH_SESSION_IDLE_TIMEOUT_MINUTES", &v)?;
         }
         // Log level: `ABYSSUM_LOG` is the documented short form (see design.md);
         // `ABYSSUM_LOG_LEVEL` follows the sectioned naming. `ABYSSUM_LOG` wins.
@@ -397,6 +431,23 @@ mod tests {
         let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "hourly")]);
         let err = Config::load_from("/no/such/file.yaml", env).unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn auth_session_lifetimes_default_and_override() {
+        // Conservative defaults: a session cannot outlive a day, and an idle one
+        // lapses after an hour.
+        let cfg = Config::default();
+        assert_eq!(cfg.auth.session_absolute_max_hours, 24);
+        assert_eq!(cfg.auth.session_idle_timeout_minutes, 60);
+
+        let env = env_of(&[
+            ("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS", "8"),
+            ("ABYSSUM_AUTH_SESSION_IDLE_TIMEOUT_MINUTES", "15"),
+        ]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.auth.session_absolute_max_hours, 8);
+        assert_eq!(cfg.auth.session_idle_timeout_minutes, 15);
     }
 
     #[test]

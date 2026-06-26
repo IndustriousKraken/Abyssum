@@ -29,6 +29,8 @@ rand = { workspace = true }
 # Durable result storage: async SQLite pool, embedded migrations, and direct
 # chrono timestamp binding (see persistence module + a03 design.md).
 sqlx = { workspace = true }
+# Argon2id password hashing for the auth module (see c02 design.md).
+argon2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -41,3 +43,6 @@ serde_json = { workspace = true }
 # Persistence integration tests build findings/sessions with explicit timestamps
 # (date-range filter coverage) and read them back through the public API.
 chrono = { workspace = true }
+# The auth integration tests read stored password-hash rows back directly to
+# prove credentials are never persisted in the clear.
+sqlx = { workspace = true }
