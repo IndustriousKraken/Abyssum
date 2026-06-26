@@ -33,8 +33,6 @@
 //!
 //! [`purge_expired`]: AuthManager::purge_expired
 
-use std::sync::OnceLock;
-
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use chrono::{DateTime, Duration, Utc};
@@ -405,11 +403,18 @@ fn verify_password(password: &str, encoded: &str) -> bool {
 }
 
 /// A fixed Argon2id hash to verify against when the username is unknown, so the
-/// login failure path costs the same whether or not the user exists. Computed
-/// once on first use.
+/// login failure path costs the same whether or not the user exists. Hardcoded
+/// (not computed) so it has no failure mode that could quietly skip the verify
+/// and shorten the unknown-user path. Generated offline with `Argon2::default()`
+/// params (`m=4096,t=3,p=1`), which must match what [`hash_password`] emits so
+/// the dummy verify costs the same as a real one; the
+/// `dummy_hash_uses_default_params` test guards that.
+const DUMMY_HASH: &str =
+    "$argon2id$v=19$m=4096,t=3,p=1$ra1p8llsgiBhwdjx9qzC0Q$FaAY9lkRGyYfSthvIZcFtecQpQaLm13BGq5F1+Q1sC8";
+
+/// See [`DUMMY_HASH`].
 fn dummy_hash() -> &'static str {
-    static DUMMY: OnceLock<String> = OnceLock::new();
-    DUMMY.get_or_init(|| hash_password("a-password-that-matches-nothing").unwrap_or_default())
+    DUMMY_HASH
 }
 
 /// A fresh opaque, high-entropy session token: 32 CSPRNG bytes (256 bits),
@@ -449,6 +454,29 @@ fn row_to_user(row: &SqliteRow) -> Result<User> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dummy_hash_uses_default_params() {
+        // The dummy must parse, never accidentally verify, and carry the SAME
+        // Argon2 params as a real stored hash — otherwise the unknown-user verify
+        // would cost differently and weaken the timing equalization. Param drift
+        // (e.g. an argon2 crate bump changing the defaults) fails this.
+        assert!(
+            PasswordHash::new(DUMMY_HASH).is_ok(),
+            "dummy must be valid PHC"
+        );
+        assert!(!verify_password("hunter2", DUMMY_HASH));
+
+        let live = PasswordHash::new(DUMMY_HASH).unwrap();
+        let fresh = hash_password("x").unwrap();
+        let fresh = PasswordHash::new(&fresh).unwrap();
+        assert_eq!(live.algorithm, fresh.algorithm);
+        assert_eq!(live.version, fresh.version);
+        assert_eq!(
+            live.params, fresh.params,
+            "DUMMY_HASH params drifted from Argon2::default(); regenerate it"
+        );
+    }
 
     #[test]
     fn hash_is_not_plaintext_and_round_trips() {
