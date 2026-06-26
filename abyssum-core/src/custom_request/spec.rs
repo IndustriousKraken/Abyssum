@@ -268,7 +268,10 @@ pub(crate) fn normalize_method(raw: &str) -> String {
 /// value the operator already prefixed with `Bearer `.
 fn bearer_header_value(token: &str) -> String {
     let token = token.trim();
-    if token.len() >= 7 && token[..7].eq_ignore_ascii_case("bearer ") {
+    if token
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("bearer "))
+    {
         token.to_string()
     } else {
         format!("Bearer {token}")
@@ -398,6 +401,15 @@ mod tests {
         assert_eq!(bearer_header_value("Bearer xyz"), "Bearer xyz");
         // Case-insensitive on the existing prefix.
         assert_eq!(bearer_header_value("bearer xyz"), "bearer xyz");
+    }
+
+    #[test]
+    fn bearer_value_is_total_on_non_ascii_input() {
+        // A token whose byte 7 falls inside a multi-byte char: `aaaa` (4 bytes)
+        // then a 4-byte emoji spanning bytes 4..8, so byte index 7 is not a char
+        // boundary. A byte-index slice `token[..7]` would panic here; `get(..7)`
+        // returns None and the value is simply prefixed.
+        assert_eq!(bearer_header_value("aaaa\u{1F600}"), "Bearer aaaa\u{1F600}");
     }
 
     #[test]
