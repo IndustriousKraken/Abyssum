@@ -16,6 +16,7 @@
 //! [`ScanContext`](scan::ScanContext), so the pacing floor cannot be bypassed.
 
 pub mod config;
+pub mod custom_request;
 pub mod error;
 pub mod logging;
 pub mod persistence;
@@ -24,6 +25,11 @@ pub mod scan;
 pub mod seed;
 
 pub use config::{Config, UserAgentRotation};
+pub use custom_request::{
+    analyze, execute as execute_custom_request, CaptureResult, CapturedResponse, CustomRequestSpec,
+    OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind, DEFAULT_BODY_PREVIEW_CAP,
+    DEFAULT_TIMEOUT,
+};
 pub use error::{Error, Result};
 pub use persistence::{
     DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
