@@ -68,12 +68,13 @@ subsequent accounts.
 - **THEN** that account SHALL have the regular user role
 
 ### Requirement: Scan Session Ownership And Visibility
-The system SHALL record the user that created each scan session as its immutable owner, and
-SHALL restrict visibility so a regular user sees only their own sessions while an `admin`
-sees all sessions.
+The system SHALL record the user that created each web-surface scan session as its immutable
+owner, and SHALL restrict visibility so a regular user sees only their own sessions while an
+`admin` sees all sessions. CLI-initiated sessions have no owner and are visible only to
+`admin` users.
 
 #### Scenario: Creating user is recorded as owner
-- **GIVEN** an authenticated user starts a scan
+- **GIVEN** an authenticated user starts a scan through the web surface
 - **WHEN** the scan session is created
 - **THEN** the session SHALL record that user as its owner
 - **AND** the owner SHALL NOT change thereafter
