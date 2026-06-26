@@ -4,12 +4,12 @@
 
 ### Requirement: Authenticated Web Surface
 The web interface SHALL require an authenticated session for every page and data endpoint
-except the login page and static assets, so that no scanning or history is reachable
-anonymously.
+except the login page, the registration page, and static assets, so that no scanning or
+history is reachable anonymously.
 
 #### Scenario: Unauthenticated page request redirects to login
 - **GIVEN** a visitor with no authenticated session
-- **WHEN** they request any application page other than the login page
+- **WHEN** they request any application page other than the login page or the registration page
 - **THEN** the system SHALL redirect them to the login page
 - **AND** SHALL NOT disclose any scan data
 
