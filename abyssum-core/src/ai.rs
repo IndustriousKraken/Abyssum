@@ -24,9 +24,6 @@ use crate::config::AiConfig;
 use crate::error::{Error, Result};
 use crate::scan::Finding;
 
-/// Default evidence character budget, used when a caller has nothing better.
-pub const DEFAULT_MAX_EVIDENCE_CHARS: usize = 4000;
-
 /// The fixed system message. It frames the model as a security analyst assisting
 /// **authorized** testing — the phrasing that most affects whether a hosted model
 /// will engage with a legitimate analysis request (the keyless/self-hosted path is
