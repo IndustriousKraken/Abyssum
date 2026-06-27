@@ -1,9 +1,8 @@
-//! `abyssum-web` — the web surface.
+//! `abyssum-web` — the web surface binary.
 //!
-//! For the bootstrap change this only proves the workspace builds and links end
-//! to end: it parses arguments (exposing `--version` and `--help`), loads
-//! configuration, initializes logging, prints a startup line reporting where it
-//! *would* bind, and exits cleanly. The axum server arrives in a later change.
+//! A thin wrapper: parse arguments (clap exposes `--version`/`--help`), load
+//! layered configuration, initialize logging, then build the engine and serve
+//! until stopped. All behavior lives in the [`abyssum_web`] library.
 
 use std::process::ExitCode;
 
@@ -15,7 +14,7 @@ use clap::Parser;
 #[command(
     name = "abyssum-web",
     version,
-    about = "Abyssum web surface (server not implemented yet)",
+    about = "Abyssum web surface (authenticated UI with live scan progress)",
     long_about = None
 )]
 struct Cli {
@@ -30,7 +29,8 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    // clap handles `--version` / `--help` here, printing and exiting with 0.
+    // clap handles `--version` / `--help` here, printing and exiting with 0
+    // before any runtime is built.
     let cli = Cli::parse();
 
     let config = match Config::load(&cli.config) {
@@ -42,19 +42,20 @@ fn main() -> ExitCode {
     };
 
     logging::init(&config);
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        host = %config.server.host,
-        port = config.server.port,
-        "abyssum-web starting"
-    );
 
-    println!(
-        "abyssum-web {} ready — would bind {}:{} (server not implemented yet)",
-        env!("CARGO_PKG_VERSION"),
-        config.server.host,
-        config.server.port
-    );
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("abyssum-web: failed to start async runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    ExitCode::SUCCESS
+    match runtime.block_on(abyssum_web::serve(config)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("abyssum-web: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
