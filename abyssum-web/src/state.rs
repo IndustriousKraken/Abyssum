@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use abyssum_core::{
-    AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter, ScannerRegistry,
+    AnnotationStore, AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter,
+    ScannerRegistry,
 };
 use abyssum_scanners::register_builtins;
 use axum::extract::Request;
@@ -37,6 +38,8 @@ pub struct AppState {
     pub db: DatabaseManager,
     /// The authentication authority (login, sessions, ownership).
     pub auth: AuthManager,
+    /// Notes + color tags over sessions and findings, gated by session ownership.
+    pub annotations: AnnotationStore,
     /// The scan engine, shared so background runs and handlers drive one engine.
     pub orchestrator: Arc<Orchestrator>,
     /// Live per-session progress fan-out for the WebSocket endpoint.
@@ -59,6 +62,7 @@ impl AppState {
         register_builtins(&mut registry, &db.reference_store());
 
         let auth = AuthManager::from_database(&db, &config);
+        let annotations = AnnotationStore::from_database(&db);
         let limiter = RateLimiter::from_config(&config.scanning);
         let orchestrator = Arc::new(Orchestrator::new(config.clone(), registry));
 
@@ -66,6 +70,7 @@ impl AppState {
             config,
             db,
             auth,
+            annotations,
             orchestrator,
             hub: Hub::default(),
             limiter,
@@ -96,6 +101,29 @@ pub fn build_router(state: AppState, static_dir: impl AsRef<Path>) -> Router {
         .route("/stats", get(handlers::stats_fragment))
         .route("/findings", get(handlers::findings_fragment))
         .route("/custom-requests", post(handlers::custom_exec))
+        // Annotations: notes on sessions/findings, color tags, and the
+        // note/tag-scoped session searches. All owner-gated in the handlers.
+        .route(
+            "/scan/{id}/notes",
+            get(handlers::session_notes_fragment).post(handlers::add_session_note),
+        )
+        .route(
+            "/scan/{id}/findings/{fid}/notes",
+            get(handlers::finding_notes_fragment).post(handlers::add_finding_note),
+        )
+        .route("/notes/{note_id}/edit", post(handlers::edit_note))
+        .route("/notes/{note_id}/delete", post(handlers::delete_note))
+        .route("/tags", get(handlers::list_tags).post(handlers::create_tag))
+        .route(
+            "/scan/{id}/tags",
+            get(handlers::session_tags_fragment).post(handlers::apply_tags),
+        )
+        .route(
+            "/scan/{id}/tags/{tag_id}/remove",
+            post(handlers::remove_tag),
+        )
+        .route("/search/notes", get(handlers::search_by_note))
+        .route("/search/tags", get(handlers::search_by_tags))
         .route("/ws/{id}", get(handlers::ws_handler))
         .route_layer(from_fn_with_state(state.clone(), require_user_data));
 

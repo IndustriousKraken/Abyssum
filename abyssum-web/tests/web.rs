@@ -371,6 +371,109 @@ async fn search_and_filter_are_scoped_to_the_requesting_user() {
     );
 }
 
+// --- Annotations: notes, tags, search (owner-scoped) -----------------------
+
+#[tokio::test]
+async fn annotations_notes_tags_and_search_over_the_web_surface() {
+    let app = TestApp::spawn().await;
+    let _admin = make_user(&app, "admin").await; // first → admin
+    let alice = make_user(&app, "alice").await;
+    let _bob = make_user(&app, "bob").await;
+
+    let f = finding(
+        "cors",
+        "https://alice.test",
+        Severity::High,
+        Status::Vulnerable,
+        "Permissive CORS",
+        "reflects origin",
+    );
+    let sid = seed_session(&app, alice.id, "https://alice.test", &[f]).await;
+    let fid = app.state.db.get_findings(sid).await.unwrap()[0].id.unwrap();
+
+    let mut alice_c = authed_client(&app, "alice").await;
+
+    // Add a session-level note; the returned fragment shows it.
+    let body = format!(
+        "content={}&_csrf={}",
+        enc("triage: exploitable"),
+        enc(&alice_c.csrf())
+    );
+    let resp = alice_c
+        .post_form(&format!("/scan/{sid}/notes"), &body)
+        .await;
+    assert_eq!(resp.status, 200);
+    assert!(
+        resp.body.contains("triage: exploitable"),
+        "note shown: {}",
+        resp.body
+    );
+
+    // Add a finding-level note.
+    let body = format!(
+        "content={}&_csrf={}",
+        enc("write this one up"),
+        enc(&alice_c.csrf())
+    );
+    let resp = alice_c
+        .post_form(&format!("/scan/{sid}/findings/{fid}/notes"), &body)
+        .await;
+    assert_eq!(resp.status, 200);
+    assert!(resp.body.contains("write this one up"));
+
+    // Apply a tag (auto-created), then see it on the session's tag fragment.
+    let body = format!(
+        "tags={}&color={}&_csrf={}",
+        enc("Auth-Bypass"),
+        enc("#ff0000"),
+        enc(&alice_c.csrf())
+    );
+    let resp = alice_c.post_form(&format!("/scan/{sid}/tags"), &body).await;
+    assert_eq!(resp.status, 200);
+    assert!(
+        resp.body.contains("auth-bypass"),
+        "chip shown normalized: {}",
+        resp.body
+    );
+
+    // The all-tags list reports the usage.
+    let resp = alice_c.get("/tags").await;
+    assert!(resp.body.contains("auth-bypass") && resp.body.contains("1 session"));
+
+    // Search by note text returns the session.
+    let resp = alice_c.get("/search/notes?q=triage").await;
+    assert!(
+        resp.body.contains(&sid.to_string()[..8]),
+        "note search finds the session"
+    );
+
+    // Filter by tag (any) returns the session.
+    let resp = alice_c.get("/search/tags?tags=auth-bypass&mode=any").await;
+    assert!(
+        resp.body.contains(&sid.to_string()[..8]),
+        "tag filter finds the session"
+    );
+
+    // A non-owner non-admin is denied the notes fragment and any mutation.
+    let mut bob_c = authed_client(&app, "bob").await;
+    assert_eq!(bob_c.get(&format!("/scan/{sid}/notes")).await.status, 404);
+    let body = format!("content={}&_csrf={}", enc("intrude"), enc(&bob_c.csrf()));
+    assert_eq!(
+        bob_c
+            .post_form(&format!("/scan/{sid}/notes"), &body)
+            .await
+            .status,
+        404
+    );
+
+    // Bob's own note search does not surface alice's session.
+    let resp = bob_c.get("/search/notes?q=triage").await;
+    assert!(
+        !resp.body.contains(&sid.to_string()[..8]),
+        "search is owner-scoped"
+    );
+}
+
 // --- 10.5 Custom requests --------------------------------------------------
 
 #[tokio::test]
