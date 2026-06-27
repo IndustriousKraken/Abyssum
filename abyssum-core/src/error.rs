@@ -59,6 +59,12 @@ pub enum Error {
     #[error("authentication error: {0}")]
     Auth(String),
 
+    /// A requested resource does not exist — e.g. a report was asked for a session
+    /// identifier no stored session carries. Added by `d01-add-report-generation`;
+    /// surfaces map it to a not-found / non-zero result.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

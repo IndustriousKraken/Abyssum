@@ -20,6 +20,7 @@ async fn full_run_persists_session_and_all_formats_agree() {
     let cfg_path = write_config(dir.path(), &db_path);
 
     let cli = Cli {
+        command: None,
         targets: vec![format!("http://{addr}")],
         scanners: vec!["cors".to_string()],
         min_delay: None,

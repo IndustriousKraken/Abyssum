@@ -23,6 +23,7 @@ pub mod error;
 pub mod logging;
 pub mod persistence;
 pub mod rate_limiter;
+pub mod report;
 pub mod scan;
 pub mod seed;
 
@@ -39,6 +40,7 @@ pub use persistence::{
     DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
 };
 pub use rate_limiter::{Pace, RateLimiter};
+pub use report::{ReportFormat, ReportGenerator, ReportOptions};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Method, Orchestrator,
     ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanSession,
