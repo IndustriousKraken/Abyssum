@@ -15,7 +15,10 @@ use abyssum_core::{
     AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter, ScannerRegistry,
 };
 use abyssum_scanners::register_builtins;
-use axum::middleware::from_fn_with_state;
+use axum::extract::Request;
+use axum::http::HeaderValue;
+use axum::middleware::{from_fn, from_fn_with_state, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
@@ -113,6 +116,48 @@ pub fn build_router(state: AppState, static_dir: impl AsRef<Path>) -> Router {
         .merge(data_routes)
         .nest_service("/static", ServeDir::new(static_dir.as_ref()))
         .with_state(state)
+        // Stamp security headers on every response (pages, fragments, static
+        // assets, errors) — wraps the whole router so nothing escapes uncovered.
+        .layer(from_fn(security_headers))
+}
+
+/// The Content-Security-Policy. Scripts and styles are same-origin only, except
+/// for the two exceptions the Alpine-driven UI genuinely needs: `'unsafe-eval'`
+/// for Alpine's expression evaluator (it compiles `x-bind`/`x-data` expressions
+/// with `Function()`), and `'unsafe-inline'` styles for the inline `style=`
+/// attributes the server-rendered markup uses. Everything else (connect for the
+/// live-progress WebSocket, images, fonts) falls back to `default-src 'self'`,
+/// and framing is denied outright.
+///
+/// ponytail: dropping `'unsafe-eval'` would require shipping Alpine's separate
+/// CSP build and a nonce/hashing pass — a packaging change. Tighten here if the
+/// UI ever moves to that build.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+     script-src 'self' 'unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; \
+     frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
+/// Attach the defense-in-depth security response headers to every response:
+/// CSP (above), clickjacking protection, MIME-sniffing off, and HSTS. HSTS is
+/// only honored by browsers over TLS (ignored on plain HTTP per RFC 6797), so
+/// sending it unconditionally is safe and upgrades a first HTTPS visit.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        "strict-transport-security",
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    resp
 }
 
 /// Resolve the static-asset directory: `ABYSSUM_WEB_STATIC` if set, else the

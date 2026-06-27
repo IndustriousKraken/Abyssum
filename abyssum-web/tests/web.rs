@@ -469,6 +469,26 @@ async fn login_is_rate_limited_per_source_ip() {
     assert_eq!(resp.status, 429, "the eleventh attempt is rate-limited");
 }
 
+// --- Security headers ------------------------------------------------------
+
+#[tokio::test]
+async fn security_headers_are_set_on_every_response() {
+    let app = TestApp::spawn().await;
+    // A public, unauthenticated response still carries the headers.
+    let mut client = app.client();
+    let resp = client.get("/login").await;
+
+    let csp = resp.header("content-security-policy").unwrap_or("");
+    assert!(csp.contains("default-src 'self'"), "CSP present: {csp}");
+    // Alpine's evaluator and the inline style attributes must remain allowed.
+    assert!(csp.contains("'unsafe-eval'") && csp.contains("frame-ancestors 'none'"));
+    assert_eq!(resp.header("x-frame-options"), Some("DENY"));
+    assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
+    assert!(resp
+        .header("strict-transport-security")
+        .is_some_and(|v| v.contains("max-age=")));
+}
+
 // --- polling helpers -------------------------------------------------------
 
 /// Poll `condition` until true or the timeout elapses.
