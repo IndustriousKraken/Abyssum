@@ -231,7 +231,7 @@ pub async fn findings_fragment(
         scoped_search(&state, &user, &filter).await
     };
     match findings {
-        Ok(findings) => auth::html(view::findings(&findings), None),
+        Ok(findings) => auth::html(view::findings(&findings, None), None),
         Err(_) => server_error(),
     }
 }
@@ -253,7 +253,50 @@ pub async fn scan_results(
             Err(_) => return server_error(),
         },
     };
-    auth::html(view::findings(&findings), None)
+    auth::html(view::findings(&findings, Some(id)), None)
+}
+
+/// `POST /scan/{id}/findings/{fid}/analyze` — best-effort AI analysis of one
+/// finding (owner-checked). Renders the model's analysis, or a clear notice in
+/// place on any non-fatal failure (disabled, unconfigured, or a provider error).
+/// Never aborts: the engine call returns a displayable message, not a panic.
+pub async fn analyze_finding(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, fid)): Path<(Uuid, FindingId)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    // Owner/admin only — authorize against the persisted owner, never the client.
+    if visible_session(&state.db, &user, id).await.is_err() {
+        return not_visible();
+    }
+    // Pull the finding from this session (live snapshot first, else persisted).
+    let finding = match find_in_session(&state, id, fid).await {
+        Some(finding) => finding,
+        None => return auth::html(view::error_fragment("finding not found"), None),
+    };
+
+    match abyssum_core::analyze_finding(&state.config.ai, &finding).await {
+        Ok(analysis) => auth::html(view::ai_analysis(&analysis), None),
+        // A non-fatal failure (disabled, unconfigured, provider error, timeout) is
+        // shown as a notice in place — the finding and view are left unchanged.
+        Err(err) => auth::html(view::error_fragment(&clean_err(err)), None),
+    }
+}
+
+/// Find one finding by id within a session the caller has already been authorized
+/// for: a live run accrues findings in memory, a finished one has them persisted.
+async fn find_in_session(state: &AppState, id: Uuid, fid: FindingId) -> Option<Finding> {
+    let findings = match state.hub.snapshot(id) {
+        Some(session) => session.findings,
+        None => state.db.get_findings(id).await.ok()?,
+    };
+    findings.into_iter().find(|f| f.id == Some(fid))
 }
 
 // --- Scan lifecycle --------------------------------------------------------

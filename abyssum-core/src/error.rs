@@ -65,6 +65,14 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// A best-effort AI-assist call could not produce an analysis: AI is disabled
+    /// or unconfigured, the provider was unreachable, returned an error status or a
+    /// malformed body, or the request timed out. Added by `d02-add-ai-assist`. By
+    /// contract this is always non-fatal — callers surface the message and carry on;
+    /// it never aborts a scan or persistence flow.
+    #[error("AI assist unavailable: {0}")]
+    Ai(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

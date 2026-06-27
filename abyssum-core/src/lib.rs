@@ -15,6 +15,7 @@
 //! cheaply-cloneable [`RateLimiter`] and shares it with every scanner through the
 //! [`ScanContext`](scan::ScanContext), so the pacing floor cannot be bypassed.
 
+pub mod ai;
 pub mod annotations;
 pub mod auth;
 pub mod config;
@@ -27,9 +28,10 @@ pub mod report;
 pub mod scan;
 pub mod seed;
 
+pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, Note, Tag, TagApply, TagUsage, DEFAULT_TAG_COLOR};
 pub use auth::{visible_session, visible_sessions, AuthManager, Role, User};
-pub use config::{AuthConfig, Config, UserAgentRotation};
+pub use config::{AiConfig, AuthConfig, Config, UserAgentRotation};
 pub use custom_request::{
     analyze, execute as execute_custom_request, normalize_url, CaptureResult, CapturedResponse,
     CustomRequestSpec, OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind,

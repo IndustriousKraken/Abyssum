@@ -518,6 +518,141 @@ async fn custom_requests_keyless_and_authenticated() {
     assert!(resp.body.contains("abyssum-custom-ok"));
 }
 
+// --- AI-assist analysis surface (d02) --------------------------------------
+
+/// Spawn a local mock OpenAI-compatible endpoint that always answers
+/// `/chat/completions` with a fixed assistant message. Returns the base URL.
+async fn spawn_ai_mock(answer: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": answer } }]
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// The "Analyze with AI" finding surface: the analysis renders for the owner,
+/// CSRF is enforced, a non-owner is refused, and an unknown finding shows a notice
+/// in place — never a 500 or a crash.
+#[tokio::test]
+async fn ai_analysis_surface_renders_result_and_enforces_access() {
+    let provider = spawn_ai_mock("AI says: genuine high-severity issue.").await;
+    let app = TestApp::spawn_with(|cfg| cfg.ai.base_url = provider.clone()).await;
+
+    // First registrant is the admin/owner; the second is an unrelated regular user.
+    let owner = make_user(&app, "owner").await;
+    make_user(&app, "bob").await;
+
+    let f = finding(
+        "cors",
+        "https://api.example.com",
+        Severity::High,
+        Status::Vulnerable,
+        "Permissive CORS",
+        "reflects arbitrary origin",
+    );
+    let sid = seed_session(&app, owner.id, "https://api.example.com", &[f]).await;
+    let fid = app.state.db.get_findings(sid).await.unwrap()[0].id.unwrap();
+    let path = format!("/scan/{sid}/findings/{fid}/analyze");
+
+    let mut client = authed_client(&app, "owner").await;
+
+    // CSRF is required.
+    let resp = client.post_form(&path, "_csrf=wrong").await;
+    assert_eq!(resp.status, 403);
+
+    // The owner gets the model's analysis rendered in place.
+    let body = format!("_csrf={}", enc(&client.csrf()));
+    let resp = client.post_form(&path, &body).await;
+    assert_eq!(resp.status, 200);
+    assert!(
+        resp.body.contains("AI analysis"),
+        "renders the analysis block"
+    );
+    assert!(
+        resp.body.contains("genuine high-severity issue"),
+        "renders the model's text"
+    );
+
+    // An unknown finding id under an accessible session shows a notice, not a 500.
+    let missing = format!("/scan/{sid}/findings/999999/analyze");
+    let resp = client.post_form(&missing, &body).await;
+    assert_eq!(resp.status, 200);
+    assert!(resp.body.contains("not found"));
+
+    // A non-owner regular user may not analyze the owner's finding.
+    let mut bob = authed_client(&app, "bob").await;
+    let body = format!("_csrf={}", enc(&bob.csrf()));
+    let resp = bob.post_form(&path, &body).await;
+    assert_eq!(resp.status, 404);
+    // Nothing about the analysis or finding leaks to the unauthorized user.
+    assert!(!resp.body.contains("AI analysis"));
+}
+
+/// "Failure shows a notice in place": when the provider is unreachable, the surface
+/// returns a 200 notice rather than aborting or surfacing a 500.
+#[tokio::test]
+async fn ai_analysis_failure_shows_notice_in_place() {
+    // Point the provider at a closed port so the call deterministically fails.
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = closed.local_addr().unwrap();
+    drop(closed);
+    let app = TestApp::spawn_with(|cfg| {
+        cfg.ai.base_url = format!("http://{dead}");
+        cfg.ai.timeout_seconds = 2;
+    })
+    .await;
+
+    let owner = make_user(&app, "owner").await;
+    let f = finding(
+        "cors",
+        "https://api.example.com",
+        Severity::High,
+        Status::Vulnerable,
+        "Permissive CORS",
+        "reflects arbitrary origin",
+    );
+    let sid = seed_session(&app, owner.id, "https://api.example.com", &[f]).await;
+    let fid = app.state.db.get_findings(sid).await.unwrap()[0].id.unwrap();
+
+    let mut client = authed_client(&app, "owner").await;
+    let body = format!("_csrf={}", enc(&client.csrf()));
+    let resp = client
+        .post_form(&format!("/scan/{sid}/findings/{fid}/analyze"), &body)
+        .await;
+
+    // A provider failure is a non-fatal notice: 200 with an error fragment, no 500.
+    assert_eq!(resp.status, 200);
+    assert!(
+        resp.body.contains("error"),
+        "shows a notice in place: {}",
+        resp.body
+    );
+    assert!(!resp.body.contains("AI analysis"));
+}
+
 // --- SSRF guard ------------------------------------------------------------
 
 #[tokio::test]
