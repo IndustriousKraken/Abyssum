@@ -300,6 +300,9 @@ impl AnnotationStore {
     /// and ignoring any already applied. Gated on session ownership.
     pub async fn apply_tags(&self, user: &User, session_id: Uuid, tags: &[TagApply]) -> Result<()> {
         visible_session(&self.db, user, session_id).await?;
+        // One transaction over the whole batch: a failure partway (e.g. a name
+        // that normalizes to empty) rolls back, so the apply is all-or-nothing.
+        let mut tx = self.db.pool().begin().await.map_err(db_err)?;
         for tag in tags {
             let name = normalize_tag_name(&tag.name)?;
             let color = resolve_color(tag.color.as_deref())?;
@@ -311,12 +314,12 @@ impl AnnotationStore {
             )
             .bind(&name)
             .bind(&color)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(db_err)?;
             let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
                 .bind(&name)
-                .fetch_one(self.db.pool())
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(db_err)?;
 
@@ -325,10 +328,11 @@ impl AnnotationStore {
             sqlx::query("INSERT OR IGNORE INTO session_tags (session_id, tag_id) VALUES (?, ?)")
                 .bind(session_id.to_string())
                 .bind(tag_id)
-                .execute(self.db.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
         }
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
