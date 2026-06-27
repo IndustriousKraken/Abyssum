@@ -1,11 +1,15 @@
 [package]
 name = "abyssum-web"
-description = "Abyssum web surface (axum server arrives in a later change)."
+description = "Abyssum web surface: an authenticated axum + HTMX UI over the shared scan engine, with live WebSocket progress."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+name = "abyssum_web"
+path = "src/lib.rs"
 
 [[bin]]
 name = "abyssum-web"
@@ -13,5 +17,37 @@ path = "src/main.rs"
 
 [dependencies]
 abyssum-core = { workspace = true }
+abyssum-scanners = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }
+
+# Web framework. Default features only — the `ws` feature is deliberately NOT
+# enabled: it pins tokio-tungstenite 0.28 which is absent offline, so the
+# live-progress endpoint drives the WebSocket upgrade by hand (see `ws.rs`).
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "tokio",
+    "query",
+    "matched-path",
+] }
+tower-http = { version = "0.6", default-features = false, features = ["fs"] }
+# Raw upgrade plumbing for the hand-driven WebSocket handshake.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["server", "tokio"] }
+tokio-tungstenite = "0.29"
+# default-features off: the `async-await` default pulls futures-macro 0.3.32,
+# which isn't cached (only 0.3.31). `std` + `sink` are all the WS loop needs.
+futures-util = { version = "=0.3.31", default-features = false, features = ["std", "sink"] }
+# WebSocket accept-key hashing (Sec-WebSocket-Accept = base64(sha1(key + GUID))).
+sha1 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }

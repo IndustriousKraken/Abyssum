@@ -1,0 +1,18 @@
+/* Minimal styling for the Abyssum web surface. Server-rendered HTML + HTMX
+   fragments; this only needs to be legible, not pretty. */
+:root { color-scheme: light dark; }
+body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+header nav a { margin-right: 1rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #8884; padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
+.cards { display: flex; gap: 1rem; flex-wrap: wrap; }
+.card { border: 1px solid #8884; border-radius: 0.4rem; padding: 0.75rem 1rem; min-width: 7rem; }
+.sev-critical { color: #b00020; font-weight: bold; }
+.sev-high { color: #d35400; font-weight: bold; }
+.sev-medium { color: #b9770e; }
+.sev-low { color: #1e6f1e; }
+.sev-info { color: #555; }
+.error { color: #b00020; }
+pre { background: #8881; padding: 0.5rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+label { display: block; margin: 0.5rem 0; }
+.muted { color: #777; font-size: 0.9em; }

@@ -249,7 +249,10 @@ pub struct PreparedRequest {
 /// Normalize a typed URL: trim it, and prepend `https://` when it carries no
 /// scheme, so a bare `example.com:8080` is not mis-parsed (its host becoming a
 /// "scheme"). Returns an error string for an empty or unparseable URL.
-pub(crate) fn normalize_url(raw: &str) -> Result<Url, String> {
+///
+/// Public so a surface can vet the *exact* host the tool will contact (e.g. the
+/// web SSRF guard) using this same normalization, rather than re-deriving it.
+pub fn normalize_url(raw: &str) -> Result<Url, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("URL is empty".to_string());
