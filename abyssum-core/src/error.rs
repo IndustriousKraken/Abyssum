@@ -59,6 +59,20 @@ pub enum Error {
     #[error("authentication error: {0}")]
     Auth(String),
 
+    /// A requested resource does not exist — e.g. a report was asked for a session
+    /// identifier no stored session carries. Added by `d01-add-report-generation`;
+    /// surfaces map it to a not-found / non-zero result.
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// A best-effort AI-assist call could not produce an analysis: AI is disabled
+    /// or unconfigured, the provider was unreachable, returned an error status or a
+    /// malformed body, or the request timed out. Added by `d02-add-ai-assist`. By
+    /// contract this is always non-fatal — callers surface the message and carry on;
+    /// it never aborts a scan or persistence flow.
+    #[error("AI assist unavailable: {0}")]
+    Ai(String),
+
     /// A catch-all for failures that do not (yet) warrant a dedicated variant.
     #[error("{0}")]
     Other(String),

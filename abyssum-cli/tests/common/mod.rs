@@ -4,6 +4,11 @@
 //! tests (`exit_codes.rs`) drive a scan against the same local permissive-CORS
 //! mock server with the store pointed at a temp config. The mock protocol and the
 //! config format live here, in one place, so the two test files cannot drift.
+//!
+//! Each integration-test binary compiles this module independently and uses only
+//! the helpers it needs (the report tests, for instance, need only `write_config`),
+//! so an unused helper in one binary is expected — hence the module-wide allow.
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

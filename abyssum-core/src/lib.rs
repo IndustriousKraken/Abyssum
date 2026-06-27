@@ -15,6 +15,7 @@
 //! cheaply-cloneable [`RateLimiter`] and shares it with every scanner through the
 //! [`ScanContext`](scan::ScanContext), so the pacing floor cannot be bypassed.
 
+pub mod ai;
 pub mod annotations;
 pub mod auth;
 pub mod config;
@@ -23,12 +24,14 @@ pub mod error;
 pub mod logging;
 pub mod persistence;
 pub mod rate_limiter;
+pub mod report;
 pub mod scan;
 pub mod seed;
 
+pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, Note, Tag, TagApply, TagUsage, DEFAULT_TAG_COLOR};
 pub use auth::{visible_session, visible_sessions, AuthManager, Role, User};
-pub use config::{AuthConfig, Config, UserAgentRotation};
+pub use config::{AiConfig, AuthConfig, Config, UserAgentRotation};
 pub use custom_request::{
     analyze, execute as execute_custom_request, normalize_url, CaptureResult, CapturedResponse,
     CustomRequestSpec, OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind,
@@ -39,6 +42,7 @@ pub use persistence::{
     DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
 };
 pub use rate_limiter::{Pace, RateLimiter};
+pub use report::{ReportFormat, ReportGenerator, ReportOptions};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Method, Orchestrator,
     ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanSession,

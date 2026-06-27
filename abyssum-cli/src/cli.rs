@@ -7,18 +7,27 @@
 //! `table` / `json` / `csv` by a [`ValueEnum`]. `clap` itself serves `--help` and
 //! `--version` and exits `0`.
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Abyssum: a patient, stealthy API vulnerability scanner for **authorized**
 /// security testing only.
+///
+/// With no subcommand the CLI runs a scan (its top-level `--targets`/`--scanners`
+/// flags). The `report` subcommand renders stored sessions; when it is present the
+/// scan flags are not required (`subcommand_negates_reqs`).
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "abyssum",
     version,
     about = "Abyssum — API vulnerability scanner for authorized testing",
-    long_about = None
+    long_about = None,
+    subcommand_negates_reqs = true
 )]
 pub struct Cli {
+    /// Optional subcommand. Absent → run a scan from the top-level flags below.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Target URL to scan. Repeatable; a bare host (no scheme) is treated as
     /// `https`. At least one is required.
     #[arg(
@@ -79,6 +88,58 @@ pub enum OutputFormat {
     Json,
     /// CSV with a stable header row.
     Csv,
+}
+
+/// The CLI's subcommands. Scanning is the no-subcommand default; this carries the
+/// non-scan operations.
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Generate a report for one or more stored scan sessions.
+    Report(ReportArgs),
+}
+
+/// Arguments to the `report` subcommand.
+#[derive(Debug, Clone, Args)]
+pub struct ReportArgs {
+    /// Session id(s) to report on. `markdown`/`hackerone` take exactly one;
+    /// `json`/`csv` take one or more. At least one is required.
+    #[arg(value_name = "SESSION_ID", required = true)]
+    pub sessions: Vec<String>,
+
+    /// Report format.
+    #[arg(long, value_enum, default_value_t = ReportFormat::Markdown)]
+    pub format: ReportFormat,
+
+    /// Write the report to this file instead of standard output.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<String>,
+
+    /// Omit finding evidence from the report (a redacted/short report). Evidence is
+    /// included by default; CSV never carries evidence regardless.
+    #[arg(long = "no-evidence")]
+    pub no_evidence: bool,
+
+    /// Path to the YAML configuration file (locates the result store).
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "ABYSSUM_CONFIG",
+        default_value = "abyssum.yaml"
+    )]
+    pub config: String,
+}
+
+/// The report output form. Restricted to these four by `clap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportFormat {
+    /// A self-contained Markdown submission report (single session).
+    Markdown,
+    /// A structured JSON export (one or more sessions).
+    Json,
+    /// A flat CSV summary (one or more sessions).
+    Csv,
+    /// A HackerOne-shaped submission (single session).
+    Hackerone,
 }
 
 #[cfg(test)]
@@ -152,6 +213,62 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    /// A bare scan invocation leaves `command` unset.
+    #[test]
+    fn scan_invocation_has_no_subcommand() {
+        let cli =
+            Cli::try_parse_from(["abyssum", "--targets", "a.test", "--scanners", "cors"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    /// The `report` subcommand parses its session id, format, output, and
+    /// evidence-omission flag, and does not require the scan flags.
+    #[test]
+    fn parses_report_subcommand() {
+        let cli = Cli::try_parse_from([
+            "abyssum",
+            "report",
+            "11111111-1111-1111-1111-111111111111",
+            "--format",
+            "hackerone",
+            "--output",
+            "out.md",
+            "--no-evidence",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Report(args)) => {
+                assert_eq!(args.sessions, vec!["11111111-1111-1111-1111-111111111111"]);
+                assert_eq!(args.format, ReportFormat::Hackerone);
+                assert_eq!(args.output.as_deref(), Some("out.md"));
+                assert!(args.no_evidence);
+            }
+            other => panic!("expected a report command, got {other:?}"),
+        }
+    }
+
+    /// `report` accepts several session ids (for the json/csv formats) and defaults
+    /// to markdown with evidence included.
+    #[test]
+    fn report_accepts_multiple_sessions_and_defaults() {
+        let cli =
+            Cli::try_parse_from(["abyssum", "report", "id-a", "id-b", "--format", "json"]).unwrap();
+        let Some(Command::Report(args)) = cli.command else {
+            panic!("expected a report command");
+        };
+        assert_eq!(args.sessions, vec!["id-a", "id-b"]);
+        assert_eq!(args.format, ReportFormat::Json);
+        assert!(args.output.is_none());
+        assert!(!args.no_evidence);
+    }
+
+    /// `report` requires at least one session id.
+    #[test]
+    fn report_requires_a_session_id() {
+        let err = Cli::try_parse_from(["abyssum", "report"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     /// Pacing and log-level overrides parse into their option fields.

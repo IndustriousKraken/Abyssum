@@ -8,19 +8,26 @@
 
 use std::process::ExitCode;
 
-use abyssum_cli::{execute, Cli};
+use abyssum_cli::{execute, run_report, Cli, Command};
 use clap::Parser;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     // clap handles `--version` / `--help` here, printing and exiting with 0.
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
-    match execute(cli).await {
-        Ok(outcome) => {
-            // The rendered findings already carry a trailing newline.
-            print!("{}", outcome.rendered);
-            ExitCode::from(outcome.exit_code)
+    // Branch on the subcommand: `report` renders stored sessions, anything else
+    // (the default) runs a scan. Both paths yield a (rendered, exit_code) pair.
+    let result = match cli.command.take() {
+        Some(Command::Report(args)) => run_report(args).await.map(|o| (o.rendered, o.exit_code)),
+        None => execute(cli).await.map(|o| (o.rendered, o.exit_code)),
+    };
+
+    match result {
+        Ok((rendered, exit_code)) => {
+            // The rendered output already carries a trailing newline.
+            print!("{rendered}");
+            ExitCode::from(exit_code)
         }
         Err(err) => {
             eprintln!("abyssum: {err}");

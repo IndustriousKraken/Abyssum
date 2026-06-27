@@ -40,6 +40,8 @@ pub struct Config {
     pub log: LogConfig,
     /// Authentication session lifetimes.
     pub auth: AuthConfig,
+    /// Outbound AI-assist provider (see `d02-add-ai-assist`).
+    pub ai: AiConfig,
 }
 
 /// Web-surface bind settings.
@@ -134,6 +136,37 @@ pub struct AuthConfig {
     pub session_idle_timeout_minutes: u64,
 }
 
+/// Outbound AI-assist provider configuration.
+///
+/// Identifies any OpenAI-compatible chat endpoint by `base_url` + `model`. The
+/// `api_key` is **optional**: a keyless self-hosted endpoint (e.g. Ollama) is a
+/// first-class, supported case — when no key is configured, requests carry no
+/// authorization credential at all. See `d02-add-ai-assist`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiConfig {
+    /// Base URL of the OpenAI-compatible endpoint; `/chat/completions` is appended.
+    pub base_url: String,
+    /// Model name the endpoint serves.
+    pub model: String,
+    /// Optional API key. `None`/empty ⇒ no `Authorization` header is sent.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Best-effort per-request timeout, in seconds, so a hung provider cannot stall
+    /// triage.
+    pub timeout_seconds: u64,
+    /// Whether AI assist is enabled. Off ⇒ analyze requests return a clear notice
+    /// without any outbound call.
+    pub enabled: bool,
+    /// Evidence is truncated to this many characters before being sent.
+    pub max_evidence_chars: usize,
+    /// Sampling temperature; low by default for stable, repeatable analysis.
+    pub temperature: f64,
+    /// Optional cap on the response length (provider `max_tokens`).
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
 /// Logging configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -177,6 +210,21 @@ impl Default for AuthConfig {
         Self {
             session_absolute_max_hours: 24,
             session_idle_timeout_minutes: 60,
+        }
+    }
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:11434/v1".to_string(),
+            model: "llama3.1".to_string(),
+            api_key: None,
+            timeout_seconds: 30,
+            enabled: true,
+            max_evidence_chars: 4000,
+            temperature: 0.2,
+            max_tokens: None,
         }
     }
 }
@@ -263,6 +311,34 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_IDLE_TIMEOUT_MINUTES") {
             self.auth.session_idle_timeout_minutes =
                 parse_env("ABYSSUM_AUTH_SESSION_IDLE_TIMEOUT_MINUTES", &v)?;
+        }
+        // AI provider. This section uses the `ABYSSUM_AI__*` (double-underscore)
+        // convention so the key need never be written to disk.
+        if let Some(v) = get_env("ABYSSUM_AI__BASE_URL") {
+            self.ai.base_url = v;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__MODEL") {
+            self.ai.model = v;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__API_KEY") {
+            // An empty key from the environment means "no key"; the AI module
+            // treats a blank key as absent and sends no authorization header.
+            self.ai.api_key = Some(v);
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__TIMEOUT_SECONDS") {
+            self.ai.timeout_seconds = parse_env("ABYSSUM_AI__TIMEOUT_SECONDS", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__ENABLED") {
+            self.ai.enabled = parse_env("ABYSSUM_AI__ENABLED", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__MAX_EVIDENCE_CHARS") {
+            self.ai.max_evidence_chars = parse_env("ABYSSUM_AI__MAX_EVIDENCE_CHARS", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__TEMPERATURE") {
+            self.ai.temperature = parse_env("ABYSSUM_AI__TEMPERATURE", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_AI__MAX_TOKENS") {
+            self.ai.max_tokens = Some(parse_env("ABYSSUM_AI__MAX_TOKENS", &v)?);
         }
         // Log level: `ABYSSUM_LOG` is the documented short form (see design.md);
         // `ABYSSUM_LOG_LEVEL` follows the sectioned naming. `ABYSSUM_LOG` wins.
@@ -459,6 +535,78 @@ mod tests {
         let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
         assert_eq!(cfg.auth.session_absolute_max_hours, 8);
         assert_eq!(cfg.auth.session_idle_timeout_minutes, 15);
+    }
+
+    #[test]
+    fn ai_defaults_are_keyless_and_conservative() {
+        let ai = Config::default().ai;
+        assert_eq!(ai.base_url, "http://localhost:11434/v1");
+        assert_eq!(ai.model, "llama3.1");
+        // Keyless by default — the absent-key path must be the default.
+        assert!(ai.api_key.is_none());
+        assert!(ai.enabled);
+        assert_eq!(ai.timeout_seconds, 30);
+        assert_eq!(ai.max_evidence_chars, 4000);
+        assert_eq!(ai.temperature, 0.2);
+        assert!(ai.max_tokens.is_none());
+    }
+
+    #[test]
+    fn ai_file_overlays_defaults_and_keeps_unset_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(
+            &path,
+            "ai:\n  model: gpt-4o-mini\n  base_url: https://api.openai.example/v1\n",
+        )
+        .unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert_eq!(cfg.ai.model, "gpt-4o-mini");
+        assert_eq!(cfg.ai.base_url, "https://api.openai.example/v1");
+        // Unset keys in the same section keep their defaults.
+        assert_eq!(cfg.ai.timeout_seconds, 30);
+        assert_eq!(cfg.ai.max_evidence_chars, 4000);
+        assert!(cfg.ai.api_key.is_none());
+    }
+
+    #[test]
+    fn ai_env_overrides_apply() {
+        let env = env_of(&[
+            ("ABYSSUM_AI__BASE_URL", "https://other.example/v1"),
+            ("ABYSSUM_AI__MODEL", "mixtral"),
+            ("ABYSSUM_AI__API_KEY", "sk-secret"),
+            ("ABYSSUM_AI__TIMEOUT_SECONDS", "5"),
+            ("ABYSSUM_AI__ENABLED", "false"),
+            ("ABYSSUM_AI__MAX_EVIDENCE_CHARS", "1000"),
+            ("ABYSSUM_AI__TEMPERATURE", "0.7"),
+            ("ABYSSUM_AI__MAX_TOKENS", "256"),
+        ]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.ai.base_url, "https://other.example/v1");
+        assert_eq!(cfg.ai.model, "mixtral");
+        assert_eq!(cfg.ai.api_key.as_deref(), Some("sk-secret"));
+        assert_eq!(cfg.ai.timeout_seconds, 5);
+        assert!(!cfg.ai.enabled);
+        assert_eq!(cfg.ai.max_evidence_chars, 1000);
+        assert_eq!(cfg.ai.temperature, 0.7);
+        assert_eq!(cfg.ai.max_tokens, Some(256));
+    }
+
+    #[test]
+    fn ai_null_and_empty_key_are_both_supported() {
+        // Explicit YAML null leaves the key absent.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "ai:\n  api_key: null\n").unwrap();
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert!(cfg.ai.api_key.is_none());
+
+        // An empty key from the environment is carried verbatim; the AI module is
+        // responsible for treating a blank key as "no credential".
+        let env = env_of(&[("ABYSSUM_AI__API_KEY", "")]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.ai.api_key.as_deref(), Some(""));
     }
 
     #[test]

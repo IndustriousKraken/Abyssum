@@ -311,18 +311,25 @@ pub fn progress(session: &ScanSession, scanner: Option<&str>) -> String {
 }
 
 /// The findings fragment for a session's results (and the search results list).
-pub fn findings(findings: &[Finding]) -> String {
+///
+/// When `session_id` is `Some`, each persisted finding gets an "Analyze with AI"
+/// action wired to that session (the finding-detail surface). The dashboard search
+/// list passes `None`, since its rows are summaries across many sessions.
+pub fn findings(findings: &[Finding], session_id: Option<Uuid>) -> String {
     if findings.is_empty() {
         return "<p class=\"muted\">No findings.</p>".to_string();
     }
-    let rows = findings.iter().map(finding_row).collect::<String>();
+    let rows = findings
+        .iter()
+        .map(|f| finding_row(f, session_id))
+        .collect::<String>();
     format!(
         "<table><thead><tr><th>severity</th><th>status</th><th>scanner</th>\
          <th>target</th><th>finding</th></tr></thead><tbody>{rows}</tbody></table>"
     )
 }
 
-fn finding_row(f: &Finding) -> String {
+fn finding_row(f: &Finding, session_id: Option<Uuid>) -> String {
     let description = f
         .description
         .as_deref()
@@ -339,14 +346,40 @@ fn finding_row(f: &Finding) -> String {
             )
         })
         .unwrap_or_default();
+    let analyze = match (session_id, f.id) {
+        (Some(sid), Some(fid)) => analyze_action(sid, fid),
+        _ => String::new(),
+    };
     format!(
         "<tr><td class=\"sev-{sev}\">{sev}</td><td>{status}</td><td>{scanner}</td>\
-         <td>{target}</td><td><strong>{title}</strong>{description}{evidence}</td></tr>",
+         <td>{target}</td><td><strong>{title}</strong>{description}{evidence}{analyze}</td></tr>",
         sev = severity_str(f.severity),
         status = finding_status_str(f.status),
         scanner = esc(&f.scanner_id),
         target = esc(f.target.full_url().as_str()),
         title = esc(&f.title),
+    )
+}
+
+/// The "Analyze with AI" action for one finding: a form that POSTs to the analyze
+/// endpoint and swaps the returned analysis (or notice) into the finding's own
+/// result slot.
+fn analyze_action(session_id: Uuid, finding_id: i64) -> String {
+    format!(
+        "<div class=\"ai-assist\">\
+         <form hx-post=\"/scan/{session_id}/findings/{finding_id}/analyze\" \
+           hx-target=\"#ai-{finding_id}\" hx-swap=\"innerHTML\" style=\"display:inline\">{csrf}\
+           <button type=\"submit\">Analyze with AI</button></form>\
+         <div id=\"ai-{finding_id}\"></div></div>",
+        csrf = csrf_alpine(),
+    )
+}
+
+/// The AI-analysis result fragment swapped in beneath a finding on success.
+pub fn ai_analysis(text: &str) -> String {
+    format!(
+        "<div class=\"ai-analysis\"><h4>AI analysis</h4><pre>{}</pre></div>",
+        esc(text)
     )
 }
 

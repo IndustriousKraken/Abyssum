@@ -111,6 +111,11 @@ pub fn build_router(state: AppState, static_dir: impl AsRef<Path>) -> Router {
             "/scan/{id}/findings/{fid}/notes",
             get(handlers::finding_notes_fragment).post(handlers::add_finding_note),
         )
+        // Best-effort AI analysis of one finding (owner-gated in the handler).
+        .route(
+            "/scan/{id}/findings/{fid}/analyze",
+            post(handlers::analyze_finding),
+        )
         .route("/notes/{note_id}/edit", post(handlers::edit_note))
         .route("/notes/{note_id}/delete", post(handlers::delete_note))
         .route("/tags", get(handlers::list_tags).post(handlers::create_tag))
