@@ -16,3 +16,12 @@ th, td { border: 1px solid #8884; padding: 0.3rem 0.5rem; text-align: left; vert
 pre { background: #8881; padding: 0.5rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
 label { display: block; margin: 0.5rem 0; }
 .muted { color: #777; font-size: 0.9em; }
+/* Annotations: color tag chips + notes. Chips carry an inline background color;
+   white text + a subtle outline keep them legible on any hue. */
+.tags, .tag-usage { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.tag-usage { list-style: none; padding: 0; flex-direction: column; align-items: flex-start; }
+.tag-chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.1rem 0.5rem;
+  border-radius: 1rem; color: #fff; text-shadow: 0 0 2px #0008; font-size: 0.9em; }
+.tag-chip form, .tag-chip button { all: unset; cursor: pointer; line-height: 1; }
+.note { border: 1px solid #8884; border-radius: 0.4rem; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
+.note p { margin: 0.25rem 0; }

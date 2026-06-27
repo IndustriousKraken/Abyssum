@@ -660,8 +660,9 @@ fn resolve_search_limit(limit: Option<i64>) -> i64 {
 }
 
 /// Escape the LIKE metacharacters in user free-text so a query containing `%` or
-/// `_` matches literally (paired with `ESCAPE '\'` in the SQL).
-fn escape_like(input: &str) -> String {
+/// `_` matches literally (paired with `ESCAPE '\'` in the SQL). Shared with the
+/// `annotations` module's note-content substring search.
+pub(crate) fn escape_like(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         if matches!(ch, '\\' | '%' | '_') {
@@ -673,8 +674,9 @@ fn escape_like(input: &str) -> String {
 }
 
 /// Map a session row (the `SESSION_COLUMNS_SELECT`/`list_sessions` projection) into
-/// a [`ScanSession`] with an empty `findings` list.
-fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
+/// a [`ScanSession`] with an empty `findings` list. Shared with the `annotations`
+/// module, whose note/tag searches return sessions over the same projection.
+pub(crate) fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
     let session_id: String = row.try_get("session_id").map_err(db_err)?;
     let id = Uuid::parse_str(&session_id).map_err(db_err)?;
     let status = parse_session_status(&row.try_get::<String, _>("status").map_err(db_err)?)?;

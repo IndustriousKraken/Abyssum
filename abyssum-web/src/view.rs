@@ -8,7 +8,10 @@
 //! before it lands in markup.
 
 use abyssum_core::custom_request::RequestOutcome;
-use abyssum_core::{Finding, ScanSession, SessionStatus, Severity, Summary, User};
+use abyssum_core::{
+    Finding, Note, ScanSession, SessionStatus, Severity, Summary, Tag, TagUsage, User,
+};
+use uuid::Uuid;
 
 /// HTML-escape text destined for element content or a double-quoted attribute.
 pub fn esc(input: &str) -> String {
@@ -70,6 +73,14 @@ pub fn csrf_field(token: &str) -> String {
 /// cached page markup. Falls back to an empty value when JS is off — the POST is
 /// then rejected, which is the safe default.
 fn csrf_field_for(_user: &User) -> String {
+    csrf_alpine()
+}
+
+/// A hidden CSRF input whose value Alpine fills from the `csrf` cookie at submit
+/// time — used by HTMX fragments (notes, tags, cancel) that are re-rendered
+/// without the live token threaded through. Falls back to empty (POST rejected)
+/// when JS is off.
+fn csrf_alpine() -> String {
     "<input type=\"hidden\" name=\"_csrf\" \
      x-data x-bind:value=\"(document.cookie.match(/(?:^|; )csrf=([^;]*)/)||[])[1]||''\">"
         .to_string()
@@ -152,6 +163,18 @@ pub fn dashboard(user: &User) -> String {
              <option>vulnerable</option><option>safe</option><option>info</option></select>\
            <button type=\"submit\">Search</button></form>\
          <div id=\"findings\"></div>\
+         <h2>Find sessions</h2>\
+         <form hx-get=\"/search/notes\" hx-target=\"#session-search\" hx-trigger=\"submit\">\
+           <input name=\"q\" placeholder=\"note text\" required>\
+           <button type=\"submit\">Search notes</button></form>\
+         <form hx-get=\"/search/tags\" hx-target=\"#session-search\" hx-trigger=\"submit\">\
+           <input name=\"tags\" placeholder=\"tag names\" required>\
+           <select name=\"mode\"><option value=\"any\">any tag</option>\
+             <option value=\"all\">all tags</option></select>\
+           <button type=\"submit\">Filter by tags</button></form>\
+         <div id=\"session-search\"></div>\
+         <h2>All tags</h2>\
+         <section id=\"tag-list\" hx-get=\"/tags\" hx-trigger=\"load\">Loading tags…</section>\
          <h2>Sessions</h2>\
          <section id=\"sessions\" hx-get=\"/sessions\" hx-trigger=\"load\">Loading sessions…</section>";
     page("Dashboard", Some(user), body)
@@ -239,6 +262,10 @@ pub fn scan_detail(user: &User, session: &ScanSession) -> String {
          <p>Status: <strong>{status}</strong></p>\
          {cancel}\
          {live}\
+         <h2>Tags</h2>\
+         <section hx-get=\"/scan/{id}/tags\" hx-trigger=\"load\">Loading tags…</section>\
+         <h2>Notes</h2>\
+         <section hx-get=\"/scan/{id}/notes\" hx-trigger=\"load\">Loading notes…</section>\
          <h2>Findings</h2>\
          <div id=\"results\" hx-get=\"/scan/{id}/results\" \
            hx-trigger=\"load, refresh\">Loading…</div>",
@@ -257,10 +284,9 @@ fn cancel_form(_user: &User, session: &ScanSession) -> String {
     format!(
         "<form method=\"post\" action=\"/scan/{id}/cancel\" \
            hx-post=\"/scan/{id}/cancel\" hx-target=\"#live\">\
-         <input type=\"hidden\" name=\"_csrf\" \
-           x-data x-bind:value=\"(document.cookie.match(/(?:^|; )csrf=([^;]*)/)||[])[1]||''\">\
-         <button type=\"submit\">Cancel scan</button></form>",
+         {csrf}<button type=\"submit\">Cancel scan</button></form>",
         id = session.id,
+        csrf = csrf_alpine(),
     )
 }
 
@@ -385,6 +411,134 @@ pub fn custom_response(outcome: &RequestOutcome) -> String {
 /// A standalone error fragment (e.g. a rejected scan submission).
 pub fn error_fragment(message: &str) -> String {
     format!("<p class=\"error\">{}</p>", esc(message))
+}
+
+// --- Annotations: notes + color tags ---------------------------------------
+
+/// The notes fragment for a session (`finding_id == None`) or a finding. Carries
+/// an add form plus each note with inline edit/delete. The whole block is the
+/// HTMX swap target, so add/edit/delete re-render it in place.
+pub fn notes_block(session_id: Uuid, finding_id: Option<i64>, notes: &[Note]) -> String {
+    let wrapper = match finding_id {
+        Some(fid) => format!("notes-f{fid}"),
+        None => "notes".to_string(),
+    };
+    let add_url = match finding_id {
+        Some(fid) => format!("/scan/{session_id}/findings/{fid}/notes"),
+        None => format!("/scan/{session_id}/notes"),
+    };
+    let items = if notes.is_empty() {
+        "<p class=\"muted\">No notes yet.</p>".to_string()
+    } else {
+        notes
+            .iter()
+            .map(|n| note_item(&wrapper, n))
+            .collect::<String>()
+    };
+    format!(
+        "<div id=\"{wrapper}\" class=\"notes\">\
+         <form hx-post=\"{add_url}\" hx-target=\"#{wrapper}\" hx-swap=\"outerHTML\">{csrf}\
+           <textarea name=\"content\" rows=\"2\" placeholder=\"Add a note…\" required></textarea>\
+           <button type=\"submit\">Add note</button></form>{items}</div>",
+        csrf = csrf_alpine(),
+    )
+}
+
+/// One note: content, author/timestamps, an inline edit form, and a delete form,
+/// all re-targeting the enclosing notes block (`wrapper`).
+fn note_item(wrapper: &str, note: &Note) -> String {
+    let edited = note
+        .edited_at
+        .map(|t| format!(" · edited {}", t.format("%Y-%m-%d %H:%M")))
+        .unwrap_or_default();
+    format!(
+        "<div class=\"note\"><p>{content}</p>\
+         <p class=\"muted\">{author} · {created}{edited}</p>\
+         <details><summary>edit</summary>\
+           <form hx-post=\"/notes/{id}/edit\" hx-target=\"#{wrapper}\" hx-swap=\"outerHTML\">{csrf}\
+             <textarea name=\"content\" rows=\"2\" required>{content}</textarea>\
+             <button type=\"submit\">Save</button></form></details>\
+         <form hx-post=\"/notes/{id}/delete\" hx-target=\"#{wrapper}\" hx-swap=\"outerHTML\" \
+           style=\"display:inline\">{csrf}<button type=\"submit\">Delete</button></form></div>",
+        content = esc(&note.content),
+        author = esc(&note.author),
+        created = note.created_at.format("%Y-%m-%d %H:%M"),
+        id = note.id,
+        csrf = csrf_alpine(),
+    )
+}
+
+/// The tags fragment for a session: the applied tag chips (each removable) plus
+/// an apply form. The block is the HTMX swap target for apply/remove.
+pub fn session_tags_block(session_id: Uuid, tags: &[Tag]) -> String {
+    let chips = if tags.is_empty() {
+        "<span class=\"muted\">No tags.</span>".to_string()
+    } else {
+        tags.iter()
+            .map(|t| tag_chip(session_id, t))
+            .collect::<String>()
+    };
+    format!(
+        "<div id=\"session-tags\" class=\"tags\">{chips}\
+         <form hx-post=\"/scan/{session_id}/tags\" hx-target=\"#session-tags\" \
+           hx-swap=\"outerHTML\" style=\"display:inline\">{csrf}\
+           <input name=\"tags\" placeholder=\"tag names\" required>\
+           <input name=\"color\" placeholder=\"#RRGGBB\" size=\"8\">\
+           <button type=\"submit\">Apply</button></form></div>",
+        csrf = csrf_alpine(),
+    )
+}
+
+/// One applied tag chip with a remove control.
+fn tag_chip(session_id: Uuid, tag: &Tag) -> String {
+    format!(
+        "<span class=\"tag-chip\" style=\"background:{color}\">{name}\
+         <form hx-post=\"/scan/{session_id}/tags/{tag_id}/remove\" hx-target=\"#session-tags\" \
+           hx-swap=\"outerHTML\" style=\"display:inline\">{csrf}\
+           <button type=\"submit\" title=\"remove\">×</button></form></span>",
+        color = esc(&tag.color),
+        name = esc(&tag.name),
+        tag_id = tag.id,
+        csrf = csrf_alpine(),
+    )
+}
+
+/// The all-tags list with usage counts, plus a create form. The block is the
+/// HTMX swap target for create.
+pub fn tag_list(tags: &[TagUsage]) -> String {
+    let rows = if tags.is_empty() {
+        "<p class=\"muted\">No tags defined yet.</p>".to_string()
+    } else {
+        let items = tags
+            .iter()
+            .map(|u| {
+                let desc = u
+                    .tag
+                    .description
+                    .as_deref()
+                    .map(|d| format!(" — {}", esc(d)))
+                    .unwrap_or_default();
+                format!(
+                    "<li><span class=\"tag-chip\" style=\"background:{color}\">{name}</span> \
+                     <span class=\"muted\">{count} session{plural}</span>{desc}</li>",
+                    color = esc(&u.tag.color),
+                    name = esc(&u.tag.name),
+                    count = u.session_count,
+                    plural = if u.session_count == 1 { "" } else { "s" },
+                )
+            })
+            .collect::<String>();
+        format!("<ul class=\"tag-usage\">{items}</ul>")
+    };
+    format!(
+        "<div id=\"tag-list\">\
+         <form hx-post=\"/tags\" hx-target=\"#tag-list\" hx-swap=\"outerHTML\">{csrf}\
+           <input name=\"name\" placeholder=\"tag name\" required>\
+           <input name=\"color\" placeholder=\"#RRGGBB\" size=\"8\">\
+           <input name=\"description\" placeholder=\"description (optional)\">\
+           <button type=\"submit\">Create tag</button></form>{rows}</div>",
+        csrf = csrf_alpine(),
+    )
 }
 
 fn status_str(status: SessionStatus) -> &'static str {

@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use abyssum_core::{
     execute_custom_request, normalize_url, visible_session, visible_sessions, CustomRequestSpec,
-    Finding, FindingFilter, ProgressCallback, ProgressUpdate, ScanSession, SessionHandle, Severity,
-    Status, Target, User,
+    Finding, FindingFilter, FindingId, ProgressCallback, ProgressUpdate, ScanSession,
+    SessionHandle, Severity, Status, TagApply, Target, User,
 };
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -489,6 +489,326 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
         }
+    }
+}
+
+// --- Annotations: notes ----------------------------------------------------
+
+/// `GET /scan/{id}/notes` — the session's notes fragment (owner-checked).
+pub async fn session_notes_fragment(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    render_session_notes(&state, &user, id).await
+}
+
+/// `POST /scan/{id}/notes` — add a session-level note; returns the notes fragment.
+pub async fn add_session_note(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let content = field(&form, "content").unwrap_or("");
+    match state.annotations.add_note(&user, id, None, content).await {
+        Ok(_) => render_session_notes(&state, &user, id).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// `GET /scan/{id}/findings/{fid}/notes` — a finding's notes fragment.
+pub async fn finding_notes_fragment(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, fid)): Path<(Uuid, FindingId)>,
+) -> Response {
+    render_finding_notes(&state, &user, id, fid).await
+}
+
+/// `POST /scan/{id}/findings/{fid}/notes` — add a finding-level note.
+pub async fn add_finding_note(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, fid)): Path<(Uuid, FindingId)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let content = field(&form, "content").unwrap_or("");
+    match state
+        .annotations
+        .add_note(&user, id, Some(fid), content)
+        .await
+    {
+        Ok(_) => render_finding_notes(&state, &user, id, fid).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// `POST /notes/{note_id}/edit` — edit a note; re-renders its scope's fragment.
+pub async fn edit_note(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(note_id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let content = field(&form, "content").unwrap_or("");
+    match state.annotations.edit_note(&user, note_id, content).await {
+        Ok(note) => render_note_scope(&state, &user, note.session_id, note.finding_id).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// `POST /notes/{note_id}/delete` — delete a note; re-renders its scope's fragment.
+pub async fn delete_note(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(note_id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    match state.annotations.delete_note(&user, note_id).await {
+        Ok(note) => render_note_scope(&state, &user, note.session_id, note.finding_id).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+// --- Annotations: tags -----------------------------------------------------
+
+/// `GET /tags` — the all-tags-with-usage fragment (and create form).
+pub async fn list_tags(
+    State(state): State<AppState>,
+    Extension(_user): Extension<User>,
+) -> Response {
+    render_tag_list(&state).await
+}
+
+/// `POST /tags` — explicitly create a tag; returns the tag-list fragment.
+pub async fn create_tag(
+    State(state): State<AppState>,
+    Extension(_user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("");
+    let color = nonempty(field(&form, "color"));
+    let description = nonempty(field(&form, "description"));
+    match state
+        .annotations
+        .create_tag(name, color.as_deref(), description.as_deref())
+        .await
+    {
+        Ok(_) => render_tag_list(&state).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// `GET /scan/{id}/tags` — the session's applied-tags fragment (owner-checked).
+pub async fn session_tags_fragment(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    render_session_tags(&state, &user, id).await
+}
+
+/// `POST /scan/{id}/tags` — apply one or more tags (auto-creating new names);
+/// returns the session's tags fragment.
+pub async fn apply_tags(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    // A shared optional color is used only for names that must be created.
+    let color = nonempty(field(&form, "color"));
+    let tags: Vec<TagApply> = field(&form, "tags")
+        .unwrap_or("")
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|name| TagApply {
+            name: name.to_string(),
+            color: color.clone(),
+        })
+        .collect();
+    match state.annotations.apply_tags(&user, id, &tags).await {
+        Ok(()) => render_session_tags(&state, &user, id).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// `POST /scan/{id}/tags/{tag_id}/remove` — remove a tag from a session.
+pub async fn remove_tag(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, tag_id)): Path<(Uuid, i64)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    match state.annotations.remove_tag(&user, id, tag_id).await {
+        Ok(()) => render_session_tags(&state, &user, id).await,
+        Err(err) => annotate_err(err),
+    }
+}
+
+// --- Annotations: search / filter ------------------------------------------
+
+/// `GET /search/notes?q=…` — sessions whose notes contain the term, scoped to
+/// the viewer (admin spans all owners). Returns a session-list fragment.
+pub async fn search_by_note(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Query(params): Query<NoteSearchParams>,
+) -> Response {
+    let term = params.q.as_deref().unwrap_or("").trim();
+    if term.is_empty() {
+        return auth::html(view::sessions_table(&[], &user), None);
+    }
+    match state.annotations.search_sessions_by_note(&user, term).await {
+        Ok(sessions) => auth::html(view::sessions_table(&sessions, &user), None),
+        Err(_) => server_error(),
+    }
+}
+
+/// `GET /search/tags?tags=…&mode=all|any` — sessions carrying the named tags
+/// (all or any), scoped to the viewer. Returns a session-list fragment.
+pub async fn search_by_tags(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Query(params): Query<TagSearchParams>,
+) -> Response {
+    let names: Vec<String> = params
+        .tags
+        .as_deref()
+        .unwrap_or("")
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() {
+        return auth::html(view::sessions_table(&[], &user), None);
+    }
+    let match_all = params.mode.as_deref() == Some("all");
+    match state
+        .annotations
+        .filter_sessions_by_tags(&user, &names, match_all)
+        .await
+    {
+        Ok(sessions) => auth::html(view::sessions_table(&sessions, &user), None),
+        Err(_) => server_error(),
+    }
+}
+
+/// Query parameters for the note-text session search.
+#[derive(Debug, Default, Deserialize)]
+pub struct NoteSearchParams {
+    q: Option<String>,
+}
+
+/// Query parameters for the tag session filter.
+#[derive(Debug, Default, Deserialize)]
+pub struct TagSearchParams {
+    tags: Option<String>,
+    mode: Option<String>,
+}
+
+// --- Annotation render helpers ---------------------------------------------
+
+/// Re-render a note's scope (session-level or finding-level) after a mutation.
+async fn render_note_scope(
+    state: &AppState,
+    user: &User,
+    session_id: Uuid,
+    finding_id: Option<FindingId>,
+) -> Response {
+    match finding_id {
+        Some(fid) => render_finding_notes(state, user, session_id, fid).await,
+        None => render_session_notes(state, user, session_id).await,
+    }
+}
+
+/// Render the session notes fragment, mapping errors to a 404 or error fragment.
+async fn render_session_notes(state: &AppState, user: &User, session_id: Uuid) -> Response {
+    match state.annotations.session_notes(user, session_id).await {
+        Ok(notes) => auth::html(view::notes_block(session_id, None, &notes), None),
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// Render a finding's notes fragment.
+async fn render_finding_notes(
+    state: &AppState,
+    user: &User,
+    session_id: Uuid,
+    finding_id: FindingId,
+) -> Response {
+    match state
+        .annotations
+        .finding_notes(user, session_id, finding_id)
+        .await
+    {
+        Ok(notes) => auth::html(
+            view::notes_block(session_id, Some(finding_id), &notes),
+            None,
+        ),
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// Render a session's applied-tags fragment.
+async fn render_session_tags(state: &AppState, user: &User, session_id: Uuid) -> Response {
+    match state.annotations.session_tags(user, session_id).await {
+        Ok(tags) => auth::html(view::session_tags_block(session_id, &tags), None),
+        Err(err) => annotate_err(err),
+    }
+}
+
+/// Render the all-tags list fragment.
+async fn render_tag_list(state: &AppState) -> Response {
+    match state.annotations.list_tags().await {
+        Ok(tags) => auth::html(view::tag_list(&tags), None),
+        Err(_) => server_error(),
+    }
+}
+
+/// Map an annotation error to a response: an ownership/visibility denial (or
+/// unknown session) yields a `404`, disclosing nothing; a validation error
+/// renders inline as an error fragment.
+fn annotate_err(err: abyssum_core::Error) -> Response {
+    match err {
+        abyssum_core::Error::Auth(_) => not_visible(),
+        other => auth::html(view::error_fragment(&clean_err(other)), None),
     }
 }
 
