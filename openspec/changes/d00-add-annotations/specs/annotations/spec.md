@@ -30,7 +30,7 @@ SHALL persist notes so they survive a process restart.
 - **AND** SHALL NOT store a note
 
 ### Requirement: Edit And Delete Notes
-The system SHALL let the owner of a note's session edit a note's content and delete a note.
+The system SHALL let the owner of a note's session, or an operator holding the `admin` role, edit a note's content and delete a note.
 
 #### Scenario: Edit a note
 - **GIVEN** a stored note on a session owned by the operator
@@ -77,17 +77,25 @@ color, and an optional description, and SHALL prevent duplicate or malformed tag
 
 ### Requirement: Apply And Remove Tags On Sessions
 The system SHALL let an operator apply one or more tags to a scan session and remove a tag
-from a session, where applying a tag by a name that does not yet exist creates that tag.
+from a session, where applying a tag by a name that does not yet exist creates that tag; the
+operator MAY supply a color when creating the tag implicitly, and if no color is supplied the
+system SHALL assign a default color (`#6B7280`).
 
 #### Scenario: Apply existing tags to a session
 - **GIVEN** one or more existing tags and a session owned by the operator
 - **WHEN** the operator applies those tags to the session
 - **THEN** the session SHALL carry those tags
 
-#### Scenario: Applying an unknown tag name creates the tag
+#### Scenario: Applying an unknown tag name creates the tag with a supplied color
 - **GIVEN** no tag exists with a requested name
-- **WHEN** the operator applies that name to a session
-- **THEN** the system SHALL create the tag
+- **WHEN** the operator applies that name and a valid hex color to a session
+- **THEN** the system SHALL create the tag with that color
+- **AND** SHALL apply it to the session
+
+#### Scenario: Applying an unknown tag name with no color creates the tag with the default color
+- **GIVEN** no tag exists with a requested name
+- **WHEN** the operator applies that name to a session without supplying a color
+- **THEN** the system SHALL create the tag with the default color (`#6B7280`)
 - **AND** SHALL apply it to the session
 
 #### Scenario: Re-applying a tag does not duplicate it
@@ -156,7 +164,7 @@ sessions.
 #### Scenario: Admin acts across owners
 - **GIVEN** sessions owned by several operators
 - **WHEN** an `admin` searches by note content or filters by tags
-- **THEN** the results MAY include sessions across all owners
+- **THEN** the results SHALL include sessions across all owners
 
 ### Requirement: Annotations Cleaned Up With Their Parent
 The system SHALL remove a session's notes and tag applications when the session is deleted,
