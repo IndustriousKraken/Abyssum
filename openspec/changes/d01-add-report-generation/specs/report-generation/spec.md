@@ -6,7 +6,8 @@
 The system SHALL render a scan session's findings as a self-contained Markdown document
 suitable for a bug-bounty submission, including session metadata, an executive summary with a
 severity breakdown, and per-finding detail covering type, severity, target endpoint,
-description, evidence, and a remediation recommendation.
+description, evidence (included by default; omissible per the Evidence Inclusion Control
+requirement), and a remediation recommendation.
 
 #### Scenario: Report contains session metadata and summary
 - **GIVEN** a stored session with one or more findings
@@ -32,8 +33,9 @@ description, evidence, and a remediation recommendation.
 - **AND** SHALL NOT produce a report
 
 ### Requirement: Evidence Inclusion Control
-The system SHALL include each finding's evidence in a report by default and SHALL provide an
-option to omit evidence so a redacted report can be produced.
+The system SHALL include each finding's evidence in Markdown, JSON, and HackerOne-formatted
+reports by default and SHALL provide an option to omit evidence so a redacted report can be
+produced. CSV output is a summary-only format and does not carry evidence.
 
 #### Scenario: Evidence included by default
 - **GIVEN** a finding that carries evidence
@@ -49,13 +51,14 @@ option to omit evidence so a redacted report can be produced.
 ### Requirement: JSON Export
 The system SHALL produce a structured, machine-readable JSON export covering one or more
 sessions, where each session carries its metadata and its full list of findings including each
-finding's type, severity, target, status classification, and evidence.
+finding's type, severity, target, status classification, and evidence (included by default;
+omissible per the Evidence Inclusion Control requirement).
 
 #### Scenario: Export a single session
 - **GIVEN** a stored session with findings
 - **WHEN** a JSON export is generated for that session
 - **THEN** the export SHALL be valid JSON
-- **AND** SHALL contain the session's metadata and each finding's type, severity, target, status, and evidence
+- **AND** SHALL contain the session's metadata and each finding's type, severity, target, status, and evidence (when evidence inclusion is enabled)
 
 #### Scenario: Export multiple sessions together
 - **GIVEN** two stored sessions
@@ -73,7 +76,7 @@ finding type, severity, endpoint, and a description.
 - **WHEN** a CSV summary is generated
 - **THEN** the output SHALL contain a header row
 - **AND** SHALL contain exactly one data row per reportable finding
-- **AND** each row SHALL include the session, target, scanner id, finding type, severity, and endpoint
+- **AND** each row SHALL include the session, target, scanner id, finding type, severity, endpoint, and description
 
 #### Scenario: Special characters are escaped
 - **GIVEN** a finding whose description contains a comma, quote, or newline
@@ -112,14 +115,15 @@ excluding benign or absent probe results so a report is not padded with non-find
 - **AND** SHALL NOT include the benign results
 
 ### Requirement: Report Command Surface
-The CLI SHALL expose a command that generates a report for a stored session in a chosen format
-— markdown, json, csv, or hackerone — writing it to standard output or a named file, with an
-option to omit evidence, so report generation is reachable by an operator and not merely an
-internal capability.
+The CLI SHALL expose a command that generates a report for one or more stored sessions in a
+chosen format — markdown, json, csv, or hackerone — writing it to standard output or a named
+file, with an option to omit evidence, so report generation is reachable by an operator and
+not merely an internal capability. The markdown and hackerone formats accept exactly one
+session identifier; the json and csv formats accept one or more session identifiers.
 
 #### Scenario: Generate a report in a chosen format
-- **GIVEN** a stored session with reportable findings
-- **WHEN** the operator runs the report command naming that session and a format
+- **GIVEN** one or more stored sessions with reportable findings
+- **WHEN** the operator runs the report command naming those sessions and a format
 - **THEN** the system SHALL write the report in that format to the chosen destination
 
 #### Scenario: Report command rejects an unknown session
