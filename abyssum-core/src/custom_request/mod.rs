@@ -49,8 +49,8 @@ pub use analysis::{analyze, Signal, SignalKind};
 pub use output::OutputFormat;
 pub use response::{CaptureResult, CapturedResponse, RequestOutcome};
 pub use spec::{
-    CustomRequestSpec, PreparedRequest, DEFAULT_BODY_PREVIEW_CAP, DEFAULT_MAX_BODY_BYTES,
-    DEFAULT_TIMEOUT,
+    normalize_url, CustomRequestSpec, PreparedRequest, DEFAULT_BODY_PREVIEW_CAP,
+    DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
 };
 
 use spec::MAX_REDIRECTS;

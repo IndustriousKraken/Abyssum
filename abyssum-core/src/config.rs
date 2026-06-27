@@ -50,6 +50,12 @@ pub struct ServerConfig {
     pub host: String,
     /// TCP port the web surface binds to.
     pub port: u16,
+    /// Whether the web custom-requests tool may target private/reserved addresses
+    /// (RFC 1918, loopback, link-local, cloud metadata, …). Off by default so a
+    /// shared or cloud deployment cannot be used to reach internal infrastructure;
+    /// an operator legitimately testing an internal API turns this on deliberately
+    /// (conservative-by-default, aggression opt-in).
+    pub allow_private_custom_targets: bool,
 }
 
 /// Persistence location.
@@ -142,6 +148,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 8000,
+            allow_private_custom_targets: false,
         }
     }
 }
@@ -228,6 +235,10 @@ impl Config {
         }
         if let Some(v) = get_env("ABYSSUM_SERVER_PORT") {
             self.server.port = parse_env("ABYSSUM_SERVER_PORT", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SERVER_ALLOW_PRIVATE_CUSTOM_TARGETS") {
+            self.server.allow_private_custom_targets =
+                parse_env("ABYSSUM_SERVER_ALLOW_PRIVATE_CUSTOM_TARGETS", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_DATABASE_PATH") {
             self.database.path = v;

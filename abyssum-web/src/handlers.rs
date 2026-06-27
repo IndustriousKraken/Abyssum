@@ -6,18 +6,21 @@
 //! a regular user and unrestricted for an admin, exactly as the auth engine's
 //! [`visible_session`]/[`visible_sessions`] encode it.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use abyssum_core::{
-    execute_custom_request, visible_session, visible_sessions, CustomRequestSpec, Finding,
-    FindingFilter, ProgressCallback, ProgressUpdate, ScanSession, SessionHandle, Severity, Status,
-    Target, User,
+    execute_custom_request, normalize_url, visible_session, visible_sessions, CustomRequestSpec,
+    Finding, FindingFilter, ProgressCallback, ProgressUpdate, ScanSession, SessionHandle, Severity,
+    Status, Target, User,
 };
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Extension;
 use serde::Deserialize;
+use tokio::net::lookup_host;
+use url::Host;
 use uuid::Uuid;
 
 use crate::auth;
@@ -40,9 +43,13 @@ pub async fn login_page(headers: HeaderMap) -> Response {
 /// `POST /login` — verify credentials, set the session cookie, redirect home.
 pub async fn login_submit(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    if !state.login_limiter.check(peer.ip()) {
+        return too_many();
+    }
     let form = parse_form(&body);
     if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
         return forbidden();
@@ -69,9 +76,13 @@ pub async fn register_page(headers: HeaderMap) -> Response {
 /// `POST /register` — create an account (first user → admin), redirect to login.
 pub async fn register_submit(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    if !state.login_limiter.check(peer.ip()) {
+        return too_many();
+    }
     let form = parse_form(&body);
     if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
         return forbidden();
@@ -370,6 +381,10 @@ pub async fn custom_exec(
     if url.is_empty() {
         return auth::html(view::error_fragment("a target URL is required"), None);
     }
+    // SSRF guard: refuse private/reserved targets unless the operator opted in.
+    if let Err(msg) = ssrf_vet(&url, state.config.server.allow_private_custom_targets).await {
+        return auth::html(view::error_fragment(&msg), None);
+    }
     let method = field(&form, "method").unwrap_or("GET");
     let mut spec = CustomRequestSpec::new(url).method(method);
     if let Some(b) = nonempty(field(&form, "body")) {
@@ -393,6 +408,88 @@ pub async fn custom_exec(
 
     let outcome = execute_custom_request(&spec, &state.limiter).await;
     auth::html(view::custom_response(&outcome), None)
+}
+
+// --- SSRF guard ------------------------------------------------------------
+
+/// Reject a custom-request target that points at a private, loopback, link-local,
+/// or otherwise reserved address — an SSRF / lateral-movement guard for the
+/// authenticated tool (e.g. cloud metadata at `169.254.169.254`, localhost
+/// services, RFC 1918 hosts). Hostnames are resolved and *every* returned address
+/// is checked, so a public name that resolves to a private IP is still caught.
+/// Skipped entirely when the operator has opted into private targets.
+///
+/// The URL is normalized exactly as the tool will send it (same scheme-defaulting),
+/// so the host vetted here is the host actually contacted.
+///
+/// ponytail: reqwest re-resolves the name when it connects, so a racing DNS rebind
+/// could still slip a private IP past this check. Closing that fully needs pinning
+/// the vetted IP via a custom reqwest resolver/connector — add it if this tool is
+/// ever exposed to untrusted operators.
+async fn ssrf_vet(raw_url: &str, allow_private: bool) -> Result<(), String> {
+    if allow_private {
+        return Ok(());
+    }
+    let url = normalize_url(raw_url).map_err(|_| "invalid target URL".to_string())?;
+    let blocked = "target resolves to a private or reserved address; set \
+                   server.allow_private_custom_targets to allow internal targets"
+        .to_string();
+    match url.host() {
+        Some(Host::Ipv4(ip)) if is_blocked_ip(IpAddr::V4(ip)) => Err(blocked),
+        Some(Host::Ipv6(ip)) if is_blocked_ip(IpAddr::V6(ip)) => Err(blocked),
+        Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => Ok(()),
+        Some(Host::Domain(name)) => {
+            if name.eq_ignore_ascii_case("localhost") {
+                return Err(blocked);
+            }
+            let port = url.port_or_known_default().unwrap_or(0);
+            let addrs = lookup_host((name, port))
+                .await
+                .map_err(|_| "could not resolve target host".to_string())?;
+            let mut resolved = false;
+            for addr in addrs {
+                resolved = true;
+                if is_blocked_ip(addr.ip()) {
+                    return Err(blocked);
+                }
+            }
+            if resolved {
+                Ok(())
+            } else {
+                Err("could not resolve target host".to_string())
+            }
+        }
+        None => Err("target URL has no host".to_string()),
+    }
+}
+
+/// Whether `ip` falls in a private, loopback, link-local, or otherwise reserved
+/// range the custom-requests tool must not reach by default. Covers RFC 1918,
+/// carrier-grade NAT, link-local, loopback, unspecified, broadcast, and TEST-NET,
+/// plus IPv6 loopback/unspecified and unique-/link-local; an IPv4-mapped IPv6
+/// address is unwrapped and re-checked.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // 100.64.0.0/10 carrier-grade NAT (`Ipv4Addr::is_shared` is unstable).
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
 }
 
 // --- Background execution --------------------------------------------------
@@ -465,6 +562,15 @@ async fn scoped_search(
 /// `403 Forbidden` for a failed CSRF check.
 fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, "forbidden").into_response()
+}
+
+/// `429 Too Many Requests` for an IP that has exceeded the auth-attempt rate.
+fn too_many() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many attempts; try again shortly",
+    )
+        .into_response()
 }
 
 /// A session the viewer may not see — and one that does not exist — both yield
@@ -611,6 +717,39 @@ mod tests {
         assert_eq!(nonempty(Some("  x ")).as_deref(), Some("x"));
         assert_eq!(nonempty(Some("   ")), None);
         assert_eq!(nonempty(None), None);
+    }
+
+    #[test]
+    fn is_blocked_ip_rejects_private_reserved_allows_public() {
+        let blk = |s: &str| is_blocked_ip(s.parse().unwrap());
+        // Private / loopback / link-local / reserved / cloud-metadata / CGNAT.
+        assert!(blk("127.0.0.1"));
+        assert!(blk("10.0.0.5"));
+        assert!(blk("192.168.1.1"));
+        assert!(blk("172.16.0.1"));
+        assert!(blk("169.254.169.254"));
+        assert!(blk("100.64.0.1"));
+        assert!(blk("0.0.0.0"));
+        assert!(blk("::1"));
+        assert!(blk("fc00::1"));
+        assert!(blk("fe80::1"));
+        assert!(blk("::ffff:127.0.0.1")); // IPv4-mapped loopback
+                                          // Public addresses are allowed through.
+        assert!(!blk("8.8.8.8"));
+        assert!(!blk("1.1.1.1"));
+        assert!(!blk("2606:4700:4700::1111"));
+    }
+
+    #[test]
+    fn ssrf_vet_allows_when_opted_in_and_blocks_loopback() {
+        // Opt-in bypasses the guard entirely.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(ssrf_vet("http://127.0.0.1/", true)).is_ok());
+        // Default policy blocks an IP-literal loopback and the `localhost` name.
+        assert!(rt.block_on(ssrf_vet("http://127.0.0.1/", false)).is_err());
+        assert!(rt.block_on(ssrf_vet("http://localhost/", false)).is_err());
+        // A public host passes the literal/name checks.
+        assert!(rt.block_on(ssrf_vet("https://1.1.1.1/", false)).is_ok());
     }
 
     #[test]

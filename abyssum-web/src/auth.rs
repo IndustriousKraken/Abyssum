@@ -7,6 +7,11 @@
 //! carry a double-submit CSRF token (a non-`HttpOnly` `csrf` cookie echoed in a
 //! form field), validated constant-time on submit.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use abyssum_core::User;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -105,6 +110,44 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+// --- Brute-force throttle --------------------------------------------------
+
+/// Sliding window for the per-IP auth-attempt limiter.
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+/// Attempts allowed per source IP within [`LOGIN_WINDOW`] before throttling.
+const LOGIN_MAX_ATTEMPTS: usize = 10;
+
+/// A per-source-IP sliding-window limiter for the auth POST endpoints
+/// (login + register), blunting credential brute-force at network speed. The two
+/// endpoints share one bucket per IP. Cheap to clone (one shared map behind an
+/// `Arc`); the existing scan [`RateLimiter`](abyssum_core::RateLimiter) is an
+/// outbound *pacing* limiter and does not fit inbound attempt-counting.
+///
+/// ponytail: the map keeps one entry per IP seen this process; an attacker
+/// rotating through millions of IPs grows it slowly. Add a periodic sweep of
+/// expired buckets (or an LRU cap) if that ever matters.
+#[derive(Clone, Default)]
+pub struct LoginLimiter {
+    hits: Arc<Mutex<HashMap<IpAddr, Vec<Instant>>>>,
+}
+
+impl LoginLimiter {
+    /// Record an attempt from `ip` and report whether it is within the rate.
+    /// Returns `false` once the IP has used its window budget; the rejected
+    /// attempt is not recorded, so capacity returns as the window slides.
+    pub fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut hits = self.hits.lock().expect("login limiter not poisoned");
+        let times = hits.entry(ip).or_default();
+        times.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
+        if times.len() >= LOGIN_MAX_ATTEMPTS {
+            return false;
+        }
+        times.push(now);
+        true
+    }
 }
 
 // --- Responses -------------------------------------------------------------
@@ -209,6 +252,19 @@ mod tests {
         let (fresh, set) = ensure_csrf(&HeaderMap::new());
         assert_eq!(fresh.len(), 64);
         assert!(set.unwrap().contains("csrf="));
+    }
+
+    #[test]
+    fn login_limiter_caps_attempts_per_ip() {
+        let limiter = LoginLimiter::default();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert!(limiter.check(ip), "attempts within the cap are allowed");
+        }
+        assert!(!limiter.check(ip), "the over-cap attempt is throttled");
+        // A different source IP has its own independent budget.
+        let other: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(limiter.check(other));
     }
 
     #[test]

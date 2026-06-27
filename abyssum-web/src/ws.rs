@@ -139,6 +139,15 @@ pub fn upgrade(
     mut req: axum::extract::Request,
 ) -> Response {
     let headers = req.headers();
+    // RFC 6455 §4.2.1/§4.4: only version 13 is supported. A missing or different
+    // version is a failed negotiation — answer 426 advertising the version we speak.
+    if !version_supported(headers) {
+        return Response::builder()
+            .status(StatusCode::UPGRADE_REQUIRED)
+            .header("sec-websocket-version", "13")
+            .body(Body::empty())
+            .expect("valid upgrade-required response");
+    }
     let key = match websocket_key(headers) {
         Some(key) => key,
         None => return (StatusCode::BAD_REQUEST, "expected a WebSocket upgrade").into_response(),
@@ -255,6 +264,16 @@ fn websocket_key(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether the client offers WebSocket version 13 (RFC 6455 §4.2.1). A header
+/// listing several comma-separated versions passes if 13 is among them.
+fn version_supported(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-websocket-version")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').any(|token| token.trim() == "13"))
+        .unwrap_or(false)
+}
+
 /// Compute `Sec-WebSocket-Accept = base64(sha1(key + GUID))` (RFC 6455).
 fn accept_key(key: &str) -> String {
     let mut hasher = Sha1::new();
@@ -274,6 +293,18 @@ mod tests {
             accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
         );
+    }
+
+    #[test]
+    fn version_supported_requires_13() {
+        let mut h = HeaderMap::new();
+        assert!(!version_supported(&h), "absent version is rejected");
+        h.insert("sec-websocket-version", "8".parse().unwrap());
+        assert!(!version_supported(&h), "a non-13 version is rejected");
+        h.insert("sec-websocket-version", "13".parse().unwrap());
+        assert!(version_supported(&h));
+        h.insert("sec-websocket-version", "8, 13".parse().unwrap());
+        assert!(version_supported(&h), "13 among several is accepted");
     }
 
     #[test]

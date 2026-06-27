@@ -43,6 +43,10 @@ impl TestApp {
         config.scanning.min_delay = 0.0;
         config.scanning.max_delay = 0.0;
         config.log.level = "warn".to_string();
+        // The harness is local-only (canon ethics constraint): every mock target
+        // binds to 127.0.0.1, so the SSRF guard must permit private targets here.
+        // A test can flip this back off via `tweak` to exercise the guard itself.
+        config.server.allow_private_custom_targets = true;
         tweak(&mut config);
 
         let state = AppState::build(config).await.expect("build state");
@@ -52,9 +56,13 @@ impl TestApp {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service())
-                .await
-                .expect("serve");
+            // Connect-info make-service so the auth POSTs can read the peer IP.
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve");
         });
 
         TestApp {

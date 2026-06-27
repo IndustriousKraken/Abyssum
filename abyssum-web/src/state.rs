@@ -7,6 +7,7 @@
 //! authenticated page/data routes (each behind the matching auth gate), and the
 //! static assets.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
 
-use crate::auth::{require_user_data, require_user_page};
+use crate::auth::{require_user_data, require_user_page, LoginLimiter};
 use crate::handlers;
 use crate::ws::Hub;
 
@@ -40,6 +41,8 @@ pub struct AppState {
     /// One session-scoped rate limiter for the custom-requests tool, so repeated
     /// requests to a host are paced (a fresh limiter per call would defeat that).
     pub limiter: RateLimiter,
+    /// Per-source-IP throttle for the login/register POSTs (brute-force defense).
+    pub login_limiter: LoginLimiter,
 }
 
 impl AppState {
@@ -63,6 +66,7 @@ impl AppState {
             orchestrator,
             hub: Hub::default(),
             limiter,
+            login_limiter: LoginLimiter::default(),
         })
     }
 }
@@ -139,7 +143,12 @@ pub async fn serve(config: Config) -> abyssum_core::Result<()> {
     tracing::info!(%bound, "abyssum-web listening");
     println!("abyssum-web listening on http://{bound}");
 
-    axum::serve(listener, app.into_make_service())
-        .await
-        .map_err(|e| abyssum_core::Error::Other(format!("server error: {e}")))
+    // `into_make_service_with_connect_info` so handlers can read the peer address
+    // (the auth POSTs throttle per source IP).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| abyssum_core::Error::Other(format!("server error: {e}")))
 }

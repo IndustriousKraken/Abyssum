@@ -415,6 +415,60 @@ async fn custom_requests_keyless_and_authenticated() {
     assert!(resp.body.contains("abyssum-custom-ok"));
 }
 
+// --- SSRF guard ------------------------------------------------------------
+
+#[tokio::test]
+async fn custom_request_blocks_private_targets_by_default() {
+    // Flip the harness's local-only allowance back off to exercise the guard.
+    let app = TestApp::spawn_with(|cfg| cfg.server.allow_private_custom_targets = false).await;
+    make_user(&app, "operator").await;
+    let mut client = authed_client(&app, "operator").await;
+
+    // A loopback IP literal is refused before any request is issued.
+    let body = format!(
+        "url={}&method=GET&_csrf={}",
+        enc("http://127.0.0.1:9/"),
+        enc(&client.csrf())
+    );
+    let resp = client.post_form("/custom-requests", &body).await;
+    assert_eq!(resp.status, 200);
+    assert!(
+        resp.body.to_lowercase().contains("private or reserved"),
+        "a private target is blocked: {}",
+        resp.body
+    );
+
+    // The `localhost` name is refused too.
+    let body = format!(
+        "url={}&method=GET&_csrf={}",
+        enc("http://localhost:9/"),
+        enc(&client.csrf())
+    );
+    let resp = client.post_form("/custom-requests", &body).await;
+    assert!(resp.body.to_lowercase().contains("private or reserved"));
+}
+
+// --- Brute-force throttle --------------------------------------------------
+
+#[tokio::test]
+async fn login_is_rate_limited_per_source_ip() {
+    let app = TestApp::spawn().await;
+    let mut client = app.client();
+    client.get("/login").await; // establishes a csrf cookie
+
+    // Ten attempts (all failing auth → 401) are allowed; the eleventh is throttled.
+    let body = format!(
+        "username=nobody&password=wrong&_csrf={}",
+        enc(&client.csrf())
+    );
+    for _ in 0..10 {
+        let resp = client.post_form("/login", &body).await;
+        assert_ne!(resp.status, 429, "the first ten attempts are not throttled");
+    }
+    let resp = client.post_form("/login", &body).await;
+    assert_eq!(resp.status, 429, "the eleventh attempt is rate-limited");
+}
+
 // --- polling helpers -------------------------------------------------------
 
 /// Poll `condition` until true or the timeout elapses.
