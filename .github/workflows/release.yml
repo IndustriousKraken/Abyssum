@@ -1,0 +1,175 @@
+name: release
+
+# Build, checksum, and publish the static binaries (abyssum, abyssum-web) on a
+# version tag. `workflow_dispatch` (dry_run defaults to true) exercises the whole
+# build/checksum path in CI without creating a release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only; do not publish a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- lint: gate the delivery machinery (workflow + installer) ----
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint workflows (actionlint)
+        uses: reviewdog/action-actionlint@v1
+      - name: Lint installer (shellcheck)
+        run: shellcheck install.sh
+      - name: Installer smoke + negative tests
+        run: bash tests/install.test.sh
+
+  # ---- test: never ship untested binaries ----
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test --workspace
+
+  # ---- build: cross-compile both binaries for every supported triple ----
+  build:
+    name: build (${{ matrix.triple }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: zig
+            strip: strip
+          - triple: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: zig
+            strip: aarch64-linux-gnu-strip
+          - triple: aarch64-apple-darwin
+            os: macos-latest
+            cross: native
+            strip: strip
+    env:
+      # The release tag, used verbatim (leading 'v' kept) in every asset name.
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Install zig (Linux cross)
+        if: matrix.cross == 'zig'
+        uses: mlugg/setup-zig@v1
+
+      - name: Install cargo-zigbuild (Linux cross)
+        if: matrix.cross == 'zig'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install aarch64 strip (Linux arm64)
+        if: matrix.triple == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.cross }}" = "zig" ]; then
+            # `.2.17` pins the GLIBC floor (RHEL7 / Ubuntu 16.04 baseline).
+            cargo zigbuild --release --target "${{ matrix.triple }}.2.17" \
+              --bin abyssum --bin abyssum-web
+          else
+            cargo build --release --target "${{ matrix.triple }}" \
+              --bin abyssum --bin abyssum-web
+          fi
+
+      - name: Verify GLIBC floor (Linux)
+        if: matrix.cross == 'zig'
+        run: |
+          set -euo pipefail
+          floor="2.17"
+          for bin in abyssum abyssum-web; do
+            path="target/${{ matrix.triple }}/release/${bin}"
+            bad=""
+            syms="$(objdump -T "$path" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -u)"
+            for ver in $syms; do
+              highest="$(printf '%s\n%s\n' "$floor" "$ver" | sort -V | tail -n1)"
+              if [ "$highest" = "$ver" ] && [ "$ver" != "$floor" ]; then
+                bad="${bad} ${ver}"
+              fi
+            done
+            if [ -n "$bad" ]; then
+              echo "::error::${bin} requires GLIBC versions above ${floor}:${bad}"
+              exit 1
+            fi
+            echo "${bin}: GLIBC floor OK (<= ${floor})"
+          done
+
+      - name: Strip binaries
+        run: |
+          set -euo pipefail
+          for bin in abyssum abyssum-web; do
+            "${{ matrix.strip }}" "target/${{ matrix.triple }}/release/${bin}"
+          done
+
+      - name: Stage assets and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sum() { sha256sum "$1"; }
+            check() { sha256sum -c "$1"; }
+          else
+            sum() { shasum -a 256 "$1"; }
+            check() { shasum -a 256 -c "$1"; }
+          fi
+          for bin in abyssum abyssum-web; do
+            asset="${bin}-${TAG}-${{ matrix.triple }}"
+            cp "target/${{ matrix.triple }}/release/${bin}" "dist/${asset}"
+            ( cd dist && sum "$asset" > "${asset}.sha256" && check "${asset}.sha256" )
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.triple }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---- publish: only on a real tag push or an explicit non-dry-run dispatch ----
+  publish:
+    needs: [lint, test, build]
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # A hyphen in the tag (e.g. v2.0.0-rc1) marks a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
