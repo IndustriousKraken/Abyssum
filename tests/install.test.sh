@@ -15,6 +15,16 @@ TAG="v9.9.9-test"
 
 fail() { echo "TEST FAIL: $1" >&2; exit 1; }
 
+# Mirror install.sh's verifier selection so the fixture works on stock macOS
+# (shasum) as well as Linux (sha256sum).
+if command -v sha256sum >/dev/null 2>&1; then
+  sum256() { ( cd "$1" && sha256sum "$2" > "$2.sha256" ); }
+elif command -v shasum >/dev/null 2>&1; then
+  sum256() { ( cd "$1" && shasum -a 256 "$2" > "$2.sha256" ); }
+else
+  echo "TEST SKIP: no sha256sum or shasum on host" >&2; exit 0
+fi
+
 # Mirror install.sh's host detection so the fixture asset name matches.
 os="$(uname -s)"; arch="$(uname -m)"
 case "${os}/${arch}" in
@@ -32,7 +42,7 @@ build_fixture() {
   for bin in abyssum abyssum-web; do
     asset="${bin}-${TAG}-${triple}"
     printf 'FAKE %s binary for %s\n' "$bin" "$triple" > "${fix}/download/${TAG}/${asset}"
-    ( cd "${fix}/download/${TAG}" && sha256sum "$asset" > "${asset}.sha256" )
+    sum256 "${fix}/download/${TAG}" "$asset"
   done
 }
 

@@ -6,19 +6,7 @@
 # binaries (abyssum, abyssum-web) and their SHA-256 checksums, verifies each
 # checksum, and installs the verified binaries onto PATH. Verification happens
 # before anything is placed on PATH; a failure aborts without installing.
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/install.sh | bash
-#   ./install.sh [--version <tag>] [--user]
-#
-# Options:
-#   --version <tag>   install a specific release tag (default: latest)
-#   --user            install into ~/.local/bin instead of /usr/local/bin
-#
-# Env overrides (used by the local test harness; not needed in normal use):
-#   ABYSSUM_VERSION   same as --version
-#   ABYSSUM_BASE_URL  release asset download base (…/releases/download)
-#   ABYSSUM_API_URL   latest-release API endpoint (returns JSON with tag_name)
+# Run with --help for usage.
 set -euo pipefail
 
 REPO="IndustriousKraken/Abyssum"
@@ -28,6 +16,24 @@ API_URL="${ABYSSUM_API_URL:-https://api.github.com/repos/${REPO}/releases/latest
 VERSION="${ABYSSUM_VERSION:-}"
 USER_INSTALL=0
 
+# Embedded (not read from $0) so --help works under `curl | bash`, where
+# $0 is the shell, not this script file.
+USAGE="$(cat <<'EOF'
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/install.sh | bash
+  ./install.sh [--version <tag>] [--user]
+
+Options:
+  --version <tag>   install a specific release tag (default: latest)
+  --user            install into ~/.local/bin instead of /usr/local/bin
+
+Env overrides (used by the local test harness; not needed in normal use):
+  ABYSSUM_VERSION   same as --version
+  ABYSSUM_BASE_URL  release asset download base (…/releases/download)
+  ABYSSUM_API_URL   latest-release API endpoint (returns JSON with tag_name)
+EOF
+)"
+
 STEP="startup"
 trap 'echo "install.sh: failed during: ${STEP}" >&2' ERR
 
@@ -36,7 +42,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="${2:?--version needs a tag}"; shift 2 ;;
     --user) USER_INSTALL=1; shift ;;
-    -h|--help) sed -n 's/^# \{0,1\}//p' "$0" | sed '/^!/d'; exit 0 ;;
+    -h|--help) printf '%s\n' "$USAGE"; exit 0 ;;
     *) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
