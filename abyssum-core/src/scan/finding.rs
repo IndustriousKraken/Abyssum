@@ -119,6 +119,19 @@ impl Finding {
             timestamp: None,
         }
     }
+
+    /// The stable key identifying "the same issue": the producing scanner, the
+    /// normalized target endpoint (the URL's canonical string form), and the title
+    /// (the finding's class). Two findings sharing this key are treated as one
+    /// issue — both when a report consolidates duplicates and when a run diff
+    /// matches findings across two sessions.
+    pub fn consolidation_key(&self) -> (String, String, String) {
+        (
+            self.scanner_id.clone(),
+            self.target.full_url().to_string(),
+            self.title.clone(),
+        )
+    }
 }
 
 /// Builder for [`Finding`]. Required fields are supplied to

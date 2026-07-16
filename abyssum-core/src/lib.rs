@@ -19,7 +19,9 @@ pub mod ai;
 pub mod annotations;
 pub mod auth;
 pub mod config;
+pub(crate) mod csv;
 pub mod custom_request;
+pub mod diff;
 pub mod error;
 pub mod logging;
 pub mod persistence;
@@ -37,6 +39,7 @@ pub use custom_request::{
     CustomRequestSpec, OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind,
     DEFAULT_BODY_PREVIEW_CAP, DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
 };
+pub use diff::{diff_sessions, ChangedEntry, DiffEntry, SessionDiff};
 pub use error::{Error, Result};
 pub use persistence::{
     DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,

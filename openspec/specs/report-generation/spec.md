@@ -10,28 +10,11 @@ severity breakdown, and per-finding detail covering type, severity, target endpo
 description, evidence (included by default; omissible per the Evidence Inclusion Control
 requirement), and a remediation recommendation.
 
-#### Scenario: Report contains session metadata and summary
-- **GIVEN** a stored session with one or more findings
-- **WHEN** a Markdown report is generated for the session
-- **THEN** the document SHALL include the session's target, scan date, scanner ids, and session identifier
-- **AND** SHALL include a summary stating the total number of findings
-- **AND** SHALL include a count of findings for each severity level
-
-#### Scenario: Each finding is detailed
-- **GIVEN** a stored session with a finding of a given type and severity
-- **WHEN** a Markdown report is generated
-- **THEN** the document SHALL include that finding's type, severity, target endpoint, and description
-- **AND** SHALL include a remediation recommendation for the finding
-
 #### Scenario: Findings ordered most-severe-first
-- **GIVEN** a session with findings of differing severities
+- **GIVEN** a session with findings of differing statuses and severities
 - **WHEN** a Markdown report is generated
-- **THEN** higher-severity findings SHALL appear before lower-severity findings
-
-#### Scenario: Unknown session is rejected
-- **WHEN** a report is requested for a session identifier that does not exist
-- **THEN** the system SHALL return a not-found error
-- **AND** SHALL NOT produce a report
+- **THEN** findings SHALL be ordered by status — vulnerable first, then safe, then informational
+- **AND** within each status, higher-severity findings SHALL appear before lower-severity findings
 
 ### Requirement: Evidence Inclusion Control
 The system SHALL include each finding's evidence in Markdown, JSON, and HackerOne-formatted
@@ -86,24 +69,15 @@ finding type, severity, endpoint, and a description.
 
 ### Requirement: HackerOne-Formatted Export
 The system SHALL produce a Markdown report shaped to a HackerOne submission, leading with the
-session's most-severe finding and presenting Summary, Steps To Reproduce, Impact, and
-Supporting Material sections, and listing any remaining findings.
+session's most important finding (per the importance ordering: vulnerable status first, then
+highest severity) and presenting Summary, Steps To Reproduce, Impact, and Supporting Material
+sections, and listing any remaining findings.
 
-#### Scenario: Lead with the most-severe finding
-- **GIVEN** a session whose findings span several severities
+#### Scenario: Lead with the most-important finding
+- **GIVEN** a session whose findings span several statuses and severities
 - **WHEN** a HackerOne-formatted export is generated
-- **THEN** the report SHALL be built around the highest-severity finding
+- **THEN** the report SHALL be built around the finding ranked most important — vulnerable status first, then highest severity
 - **AND** SHALL include Summary, Steps To Reproduce, Impact, and Supporting Material sections
-
-#### Scenario: Additional findings are listed
-- **GIVEN** a session with more than one reportable finding
-- **WHEN** a HackerOne-formatted export is generated
-- **THEN** the report SHALL list the findings other than the lead finding
-
-#### Scenario: No reportable findings is an error
-- **GIVEN** a session that has no reportable findings
-- **WHEN** a HackerOne-formatted export is requested
-- **THEN** the system SHALL return an error indicating there is nothing to report
 
 ### Requirement: Only Reportable Findings Included
 The system SHALL include only findings classified as actual issues in every report format,

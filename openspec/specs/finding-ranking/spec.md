@@ -1,7 +1,8 @@
-# finding-ranking
+# finding-ranking Specification
 
-## ADDED Requirements
-
+## Purpose
+TBD - created by archiving change add-finding-ranking. Update Purpose after archive.
+## Requirements
 ### Requirement: Collapse Duplicate Findings
 The system SHALL collapse findings that describe the same issue — the same scanner,
 the same normalized target/endpoint, and the same finding class — into a single
@@ -19,13 +20,11 @@ that differ in scanner, target/endpoint, or class SHALL remain separate.
 - **THEN** they SHALL remain separate findings
 
 ### Requirement: Rank Findings By Importance
-This requirement MODIFIES the canonical `report-generation` spec's ordering rules:
-- The 'Findings ordered most-severe-first' scenario under 'Markdown Submission Report' is modified so that findings are ordered by status (vulnerable first, then safe, then informational) and within each status by descending severity, rather than by severity alone.
-- The 'Lead with the most-severe finding' scenario under 'HackerOne-Formatted Export' is modified so that the lead finding is the most important finding per this ranking (vulnerable status first, then highest severity) rather than purely the highest severity.
-
 Reported findings SHALL be ordered by importance: findings with vulnerable status
 before those with safe or informational status, then by descending severity. Ordering
 SHALL be deterministic, so that findings of equal rank keep a stable, repeatable order.
+
+This requirement modifies the canonical `report-generation` spec's ordering rules so that they follow this importance ordering rather than severity alone: the 'Findings ordered most-severe-first' scenario under 'Markdown Submission Report' is ordered by status (vulnerable first, then safe, then informational) and within each status by descending severity; the 'Lead with the most-severe finding' scenario under 'HackerOne-Formatted Export' leads with the most important finding (vulnerable status first, then highest severity).
 
 #### Scenario: Higher importance sorts first
 - **GIVEN** a mix of findings across statuses and severities
@@ -37,3 +36,4 @@ SHALL be deterministic, so that findings of equal rank keep a stable, repeatable
 - **GIVEN** two findings of equal status and severity
 - **WHEN** the same results are reported more than once
 - **THEN** their relative order SHALL be the same each time
+
