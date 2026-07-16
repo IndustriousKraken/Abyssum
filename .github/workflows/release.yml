@@ -75,6 +75,11 @@ jobs:
       - name: Install zig (Linux cross)
         if: matrix.cross == 'zig'
         uses: mlugg/setup-zig@v1
+        with:
+          # Pin an explicit released version. Without this, setup-zig resolves
+          # `latest` dynamically and can land on a build that 404s across every
+          # mirror + ziglang.org — which is what failed the v1.0.0 release.
+          version: 0.14.0
 
       - name: Install cargo-zigbuild (Linux cross)
         if: matrix.cross == 'zig'
