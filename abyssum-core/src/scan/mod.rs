@@ -19,6 +19,7 @@
 //! keeps the six scanners from each inventing their own vocabulary.
 
 pub mod context;
+pub mod differential;
 pub mod finding;
 pub mod orchestrator;
 pub mod progress;
@@ -31,6 +32,7 @@ pub use context::{
     Credential, Method, RequestSpec, ScanContext, SingleUserAgent, UserAgentSource,
     DEFAULT_USER_AGENT,
 };
+pub use differential::{run_differential, Identity};
 pub use finding::{Finding, FindingBuilder, FindingId, Severity, Status};
 pub use orchestrator::{Orchestrator, SessionHandle};
 pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};

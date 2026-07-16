@@ -11,8 +11,9 @@
 use std::sync::Arc;
 
 use abyssum_core::{
-    logging, Config, DatabaseManager, Orchestrator, ProgressCallback, ProgressKind, ProgressUpdate,
-    ScanSession, ScannerRegistry, SessionStatus,
+    logging, CancellationToken, Config, Credential, DatabaseManager, Identity, Orchestrator,
+    ProgressCallback, ProgressKind, ProgressUpdate, ReferenceStore, ScanSession, ScannerRegistry,
+    SessionStatus, Target,
 };
 use abyssum_scanners::register_builtins;
 use uuid::Uuid;
@@ -111,14 +112,32 @@ pub async fn execute(cli: Cli) -> Result<RunOutcome, CliError> {
     // 5. Build the registry from the seeded store, then validate the requested
     //    scanner ids against its `available()` ids — still before any request.
     let config = Arc::new(config);
-    let mut registry = ScannerRegistry::new(config.clone());
-    register_builtins(&mut registry, &db.reference_store());
-    let scanner_ids = validate::resolve_scanners(&cli.scanners, &registry.available())
-        .map_err(|e| CliError::BadInput(e.to_string()))?;
+    let store = db.reference_store();
+    let scanner_ids = {
+        let registry = build_registry(&config, &store);
+        validate::resolve_scanners(&cli.scanners, &registry.available())
+            .map_err(|e| CliError::BadInput(e.to_string()))?
+    };
+
+    // Parse the named identities. Two or more trigger an auth-differential run; a
+    // single identity is an ordinary scan carrying its credential.
+    let identities = parse_identities(&cli.identities).map_err(CliError::BadInput)?;
+    if identities.len() >= 2 {
+        return execute_differential(config, db, targets, scanner_ids, identities, cli.output)
+            .await;
+    }
 
     // 6. Create a session for the targets/scanners and run it through the shared
-    //    engine, draining progress and honoring Ctrl-C.
-    let orchestrator = Orchestrator::new(config, registry);
+    //    engine, draining progress and honoring Ctrl-C. A credential from the
+    //    `--cookie`/`--bearer` flags (or, failing that, a single supplied identity)
+    //    is attached to every scanner's requests; BAC/IDOR strip it per-request.
+    let credential = flag_credential(cli.cookie.clone(), cli.bearer.clone())
+        .or_else(|| identities.into_iter().next().and_then(|id| id.credential));
+    let registry = build_registry(&config, &store);
+    let mut orchestrator = Orchestrator::new(config, registry);
+    if let Some(credential) = credential {
+        orchestrator = orchestrator.with_credential(credential);
+    }
     let handle = orchestrator
         .create_session(targets, scanner_ids)
         .map_err(|e| CliError::BadInput(e.to_string()))?;
@@ -153,6 +172,151 @@ pub async fn execute(cli: Cli) -> Result<RunOutcome, CliError> {
         session,
         rendered,
         exit_code,
+    })
+}
+
+/// Build a scanner registry from the seeded reference store. A fresh registry per
+/// call — the differential run builds one per identity.
+fn build_registry(config: &Arc<Config>, store: &ReferenceStore) -> ScannerRegistry {
+    let mut registry = ScannerRegistry::new(config.clone());
+    register_builtins(&mut registry, store);
+    registry
+}
+
+/// Build a [`Credential`] from the `--cookie` / `--bearer` flags. The two are
+/// independent; `None` only when neither is supplied — the scan then runs
+/// unauthenticated (unchanged behavior).
+fn flag_credential(cookie: Option<String>, bearer: Option<String>) -> Option<Credential> {
+    match (bearer, cookie) {
+        (None, None) => None,
+        (bearer, cookie) => Some(Credential { bearer, cookie }),
+    }
+}
+
+/// Parse each `--identity` spec into an [`Identity`]. A spec is
+/// `label[:cookie=VALUE][:bearer=TOKEN]`: the text before the first `:` is the
+/// label; each remaining `:`-separated segment is a `cookie=`/`bearer=` credential
+/// field (values may contain `=` but not `:`). A bare label is the anonymous
+/// identity.
+fn parse_identities(specs: &[String]) -> Result<Vec<Identity>, String> {
+    specs.iter().map(|spec| parse_identity(spec)).collect()
+}
+
+/// Parse one identity spec. See [`parse_identities`].
+fn parse_identity(spec: &str) -> Result<Identity, String> {
+    let mut segments = spec.split(':');
+    let label = segments.next().unwrap_or("").trim().to_string();
+    if label.is_empty() {
+        return Err(format!("identity spec {spec:?} has an empty label"));
+    }
+    let mut bearer = None;
+    let mut cookie = None;
+    for segment in segments {
+        let (key, value) = segment.split_once('=').ok_or_else(|| {
+            format!("identity segment {segment:?} in {spec:?} is not a key=value pair")
+        })?;
+        match key.trim() {
+            "bearer" => bearer = Some(value.to_string()),
+            "cookie" => cookie = Some(value.to_string()),
+            other => {
+                return Err(format!(
+                    "unknown identity field {other:?} in {spec:?} (expected 'cookie' or 'bearer')"
+                ))
+            }
+        }
+    }
+    let credential = match (bearer, cookie) {
+        (None, None) => None,
+        (bearer, cookie) => Some(Credential { bearer, cookie }),
+    };
+    Ok(Identity { label, credential })
+}
+
+/// Run an auth-differential scan: the selected scanners run once per identity, then
+/// every surfaced resource is re-probed under each identity and access-control
+/// divergence is reported. The differential findings are persisted and rendered
+/// exactly like an ordinary scan's.
+async fn execute_differential(
+    config: Arc<Config>,
+    db: DatabaseManager,
+    targets: Vec<Target>,
+    scanner_ids: Vec<String>,
+    identities: Vec<Identity>,
+    output: crate::cli::OutputFormat,
+) -> Result<RunOutcome, CliError> {
+    let store = db.reference_store();
+    // A cancellation token wired into the differential run, fired on Ctrl-C so a
+    // SIGINT stops the scan promptly and the partial findings gathered so far are
+    // still persisted — the same contract as the ordinary path's run_to_completion.
+    let cancel = CancellationToken::new();
+    let findings = {
+        let make_registry = || build_registry(&config, &store);
+        let run = abyssum_core::run_differential(
+            config.clone(),
+            make_registry,
+            &targets,
+            &scanner_ids,
+            &identities,
+            cancel.clone(),
+        );
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                // Bias toward completion so a run that finishes as the signal
+                // arrives is reported as completed, not interrupted.
+                biased;
+                result = &mut run => {
+                    break result
+                        .map_err(|e| CliError::ScanFailure(format!("differential scan failed: {e}")))?;
+                }
+                signal = tokio::signal::ctrl_c() => {
+                    if signal.is_ok() {
+                        cancel.cancel();
+                    }
+                    // Keep awaiting the run; it returns its partial findings promptly.
+                }
+            }
+        }
+    };
+    let interrupted = cancel.is_cancelled();
+
+    // Persist and render the differential findings under one session, identically
+    // to an ordinary scan (the session row first, so each finding's foreign key
+    // resolves). A run interrupted by Ctrl-C is marked Cancelled, matching the
+    // ordinary path, but its partial findings are persisted all the same.
+    let mut session = ScanSession::new(targets, scanner_ids);
+    session.status = if interrupted {
+        SessionStatus::Cancelled
+    } else {
+        SessionStatus::Completed
+    };
+    session.completed_units = session.total_units;
+    session.findings = findings;
+    // Stamp the session from a finding's timestamp (the CLI has no direct clock
+    // dependency); a divergence-free run simply carries no timestamps.
+    let stamp = session.findings.first().map(|finding| finding.timestamp);
+    session.started_at = stamp;
+    session.finished_at = stamp;
+
+    db.save_session(&session)
+        .await
+        .map_err(|e| CliError::ScanFailure(format!("failed to persist the scan session: {e}")))?;
+    for finding in &session.findings {
+        db.save_finding(session.id, finding)
+            .await
+            .map_err(|e| CliError::ScanFailure(format!("failed to persist a finding: {e}")))?;
+    }
+
+    let rendered = render::render(&session.findings, output)
+        .map_err(|e| CliError::ScanFailure(e.to_string()))?;
+    Ok(RunOutcome {
+        session,
+        rendered,
+        exit_code: if interrupted {
+            EXIT_INTERRUPTED
+        } else {
+            EXIT_SUCCESS
+        },
     })
 }
 
@@ -220,6 +384,75 @@ fn progress_callback() -> ProgressCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_identity_reads_label_and_credentials() {
+        // A bare label is the anonymous identity.
+        let anon = parse_identity("guest").unwrap();
+        assert_eq!(anon.label, "guest");
+        assert!(anon.credential.is_none());
+
+        // Bearer only.
+        let alice = parse_identity("alice:bearer=tok-a").unwrap();
+        assert_eq!(alice.label, "alice");
+        let cred = alice.credential.unwrap();
+        assert_eq!(cred.bearer.as_deref(), Some("tok-a"));
+        assert!(cred.cookie.is_none());
+
+        // Cookie whose value itself contains '=' (split is on the first '=' only).
+        let bob = parse_identity("bob:cookie=session=abc123").unwrap();
+        assert_eq!(
+            bob.credential.unwrap().cookie.as_deref(),
+            Some("session=abc123")
+        );
+
+        // Both fields, either order.
+        let both = parse_identity("carol:cookie=s=1:bearer=t").unwrap();
+        let cred = both.credential.unwrap();
+        assert_eq!(cred.cookie.as_deref(), Some("s=1"));
+        assert_eq!(cred.bearer.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn parse_identity_rejects_bad_specs() {
+        assert!(parse_identity("").is_err());
+        assert!(parse_identity(":bearer=t").is_err());
+        // A segment that is not key=value.
+        assert!(parse_identity("alice:token").is_err());
+        // An unknown field name.
+        assert!(parse_identity("alice:token=t").is_err());
+    }
+
+    #[test]
+    fn flag_credential_builds_from_either_flag() {
+        // Neither flag → no credential (unauthenticated scan).
+        assert!(flag_credential(None, None).is_none());
+        // Cookie only.
+        let c = flag_credential(Some("session=abc".into()), None).unwrap();
+        assert_eq!(c.cookie.as_deref(), Some("session=abc"));
+        assert!(c.bearer.is_none());
+        // Bearer only.
+        let c = flag_credential(None, Some("tok".into())).unwrap();
+        assert_eq!(c.bearer.as_deref(), Some("tok"));
+        assert!(c.cookie.is_none());
+        // Both.
+        let c = flag_credential(Some("session=abc".into()), Some("tok".into())).unwrap();
+        assert_eq!(c.cookie.as_deref(), Some("session=abc"));
+        assert_eq!(c.bearer.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn parse_identities_collects_all() {
+        let ids = parse_identities(&[
+            "alice:bearer=a".to_string(),
+            "bob:cookie=s=b".to_string(),
+            "guest".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[2].label, "guest");
+        assert!(ids[2].is_anonymous());
+    }
 
     #[test]
     fn exit_codes_map_from_error_kind() {

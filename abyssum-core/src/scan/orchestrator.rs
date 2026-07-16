@@ -143,6 +143,16 @@ impl Orchestrator {
         self
     }
 
+    /// Share a specific rate limiter (builder-style) instead of the one derived
+    /// from config in [`new`](Orchestrator::new). An auth-differential run builds
+    /// one limiter and hands it to every per-identity orchestrator so the per-host
+    /// pacing floor spans all identities — no identity gets a fresh, unpaced
+    /// budget.
+    pub fn with_rate_limiter(mut self, rate_limiter: RateLimiter) -> Self {
+        self.rate_limiter = rate_limiter;
+        self
+    }
+
     /// Attach a credential applied to every scanner's requests (builder-style).
     pub fn with_credential(mut self, credential: Credential) -> Self {
         self.credential = Some(credential);
