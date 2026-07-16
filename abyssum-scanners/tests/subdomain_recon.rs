@@ -1,0 +1,280 @@
+//! Integration tests for the subdomain-reconnaissance scanner.
+//!
+//! Every test runs against hand-rolled, in-process mock HTTP servers bound to
+//! random localhost ports — **no real network, no external deps, no real DNS**.
+//! The passive source is either stubbed with a fixed candidate list
+//! ([`SubdomainReconScanner::with_candidates`]) or pointed at a local mock that
+//! serves crt.sh-style JSON ([`SubdomainReconScanner::with_source_base`]). A
+//! "dead" candidate is a bound-then-dropped port, so a probe to it is refused and
+//! the scan classifies the host as not-live without touching the network.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use abyssum_core::{
+    BaseScanner, Config, DatabaseManager, RateLimiter, ScanContext, ScannerRegistry, Severity,
+    SingleUserAgent, Status, Target,
+};
+use abyssum_scanners::{SubdomainReconScanner, register_builtins};
+
+// --- Mock HTTP server -------------------------------------------------------
+
+/// A running mock server: its authority (`127.0.0.1:PORT`) and the request heads
+/// it received (request line + headers), for asserting what was queried.
+struct Mock {
+    authority: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+/// Start a mock that answers every request with `status` and `body`, closing the
+/// connection each time. Records each request head so tests can assert the path
+/// and headers a query carried.
+async fn start_mock(status: u16, body: &'static str) -> Mock {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority = listener.local_addr().unwrap().to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_bg = requests.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let (sock, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let requests = requests_bg.clone();
+            tokio::spawn(async move {
+                handle_conn(sock, status, body, requests).await;
+            });
+        }
+    });
+
+    Mock {
+        authority,
+        requests,
+    }
+}
+
+async fn handle_conn(
+    mut sock: TcpStream,
+    status: u16,
+    body: &'static str,
+    requests: Arc<Mutex<Vec<String>>>,
+) {
+    if let Some(head) = read_request_head(&mut sock).await {
+        requests.lock().unwrap().push(head);
+    }
+    let reason = if (200..300).contains(&status) {
+        "OK"
+    } else {
+        "Not Found"
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    let _ = sock.write_all(response.as_bytes()).await;
+    let _ = sock.flush().await;
+    let _ = sock.shutdown().await;
+}
+
+/// Read the request head (up to the blank-line terminator). GET carries no body,
+/// so the header terminator is sufficient.
+async fn read_request_head(sock: &mut TcpStream) -> Option<String> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        let n = sock.read(&mut tmp).await.ok()?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            break;
+        }
+    }
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Bind a port and immediately drop the listener, yielding an authority nothing
+/// listens on: a probe to it is refused, so the candidate is classified dead.
+async fn dead_authority() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    authority
+}
+
+// --- Scan helpers -----------------------------------------------------------
+
+fn ctx() -> ScanContext {
+    ScanContext::new(
+        Arc::new(Config::default()),
+        RateLimiter::new(Duration::ZERO, Duration::ZERO),
+        Arc::new(SingleUserAgent::default()),
+        CancellationToken::new(),
+    )
+}
+
+/// An apex target probed over plain HTTP, so probes reach the localhost mocks.
+fn apex() -> Target {
+    Target::parse("http://example.com").unwrap()
+}
+
+// --- Tests ------------------------------------------------------------------
+
+/// Task 6 (the required no-network test): given a stubbed passive source and
+/// stubbed HTTP responses, a takeover-fingerprinted host yields a takeover
+/// finding, a plain live host yields an info finding, and a dead host yields
+/// neither.
+#[tokio::test]
+async fn three_outcomes_takeover_live_and_dead() {
+    let takeover = start_mock(
+        404,
+        "<Error><Code>NoSuchBucket</Code>The specified bucket does not exist</Error>",
+    )
+    .await;
+    let live = start_mock(200, "<html><body>hello from a real service</body></html>").await;
+    let dead = dead_authority().await;
+
+    let scanner = SubdomainReconScanner::with_candidates([
+        takeover.authority.clone(),
+        live.authority.clone(),
+        dead.clone(),
+    ]);
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    // The dead host produced nothing: exactly two findings, one per live host.
+    assert_eq!(
+        findings.len(),
+        2,
+        "takeover + live are reported, dead is not: {findings:#?}"
+    );
+
+    let takeover_finding = findings
+        .iter()
+        .find(|f| f.evidence.as_ref().and_then(|e| e["host"].as_str()) == Some(&takeover.authority))
+        .expect("the takeover host is reported");
+    assert_eq!(takeover_finding.status, Status::Vulnerable);
+    assert!(takeover_finding.severity >= Severity::High);
+    assert_eq!(
+        takeover_finding.evidence.as_ref().unwrap()["suspected_service"],
+        "Amazon S3"
+    );
+    assert!(takeover_finding.title.contains("Amazon S3"));
+
+    let live_finding = findings
+        .iter()
+        .find(|f| f.evidence.as_ref().and_then(|e| e["host"].as_str()) == Some(&live.authority))
+        .expect("the plain live host is reported");
+    assert_eq!(live_finding.status, Status::Info);
+    assert_eq!(live_finding.severity, Severity::Info);
+    assert_eq!(live_finding.evidence.as_ref().unwrap()["takeover"], false);
+
+    // The dead host is in neither finding.
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.evidence.as_ref().and_then(|e| e["host"].as_str()) == Some(&dead)),
+        "the dead host must not be reported"
+    );
+}
+
+/// Tasks 2 + 3 + spec "Subdomains gathered from a passive source" / "Source
+/// queries are paced": the scanner queries a passive source through the paced
+/// `send` path, parses the crt.sh-style names it returns, and probes them.
+#[tokio::test]
+async fn discovers_from_passive_source_then_probes() {
+    let live = start_mock(200, "<html>up</html>").await;
+    // The source lists the (localhost) live host as a discovered name for the apex.
+    let source_json: &'static str = Box::leak(
+        format!(
+            r#"[{{"name_value":"{}","common_name":"{}"}}]"#,
+            live.authority, live.authority
+        )
+        .into_boxed_str(),
+    );
+    let source = start_mock(200, source_json).await;
+
+    let scanner = SubdomainReconScanner::with_source_base(
+        Url::parse(&format!("http://{}/", source.authority)).unwrap(),
+    );
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    // The passive source was queried through `send`: it recorded the crt.sh-style
+    // query (percent-encoded wildcard + JSON output) and carried a User-Agent.
+    let source_requests = source.requests.lock().unwrap();
+    assert_eq!(
+        source_requests.len(),
+        1,
+        "the passive source was queried once"
+    );
+    let head = &source_requests[0];
+    assert!(
+        head.contains("output=json"),
+        "crt.sh JSON output requested: {head}"
+    );
+    assert!(
+        head.contains("q=%25."),
+        "the SQL-LIKE wildcard is percent-encoded: {head}"
+    );
+    assert!(
+        head.to_lowercase().contains("user-agent:"),
+        "the query carried a rotating User-Agent (went through send): {head}"
+    );
+
+    // The discovered live host was probed and reported.
+    assert_eq!(
+        findings.len(),
+        1,
+        "one discovered host, one finding: {findings:#?}"
+    );
+    assert_eq!(findings[0].status, Status::Info);
+    assert_eq!(
+        findings[0].evidence.as_ref().unwrap()["host"],
+        live.authority
+    );
+    assert!(
+        !live.requests.lock().unwrap().is_empty(),
+        "the host was probed"
+    );
+}
+
+/// Task 1 + spec "Selectable by id": the scanner registers via `register_builtins`
+/// and is created by its stable id.
+#[tokio::test]
+async fn registered_via_builtins_and_selectable() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DatabaseManager::connect(dir.path().join("abyssum.db"))
+        .await
+        .unwrap();
+    let store = db.reference_store();
+
+    let mut registry = ScannerRegistry::new(Arc::new(Config::default()));
+    register_builtins(&mut registry, &store);
+
+    assert!(registry.contains(SubdomainReconScanner::ID));
+    assert!(
+        registry
+            .available()
+            .contains(&"subdomain_recon".to_string())
+    );
+    let scanner = registry.create("subdomain_recon").unwrap();
+    assert_eq!(scanner.id(), "subdomain_recon");
+}
+
+/// A hostless / pathful target is rejected before any traffic: recon needs a bare
+/// apex host.
+#[tokio::test]
+async fn rejects_target_with_a_path() {
+    let scanner = SubdomainReconScanner::new();
+    let with_path = Target::parse("https://example.com/api/v1").unwrap();
+    assert!(scanner.scan(&with_path, &ctx()).await.is_err());
+}
