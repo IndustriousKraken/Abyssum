@@ -22,7 +22,7 @@ The specifications in `openspec/` are the binding contract; the code implements 
 - `openspec/specs/<capability>/spec.md` — canonical requirements (the binding contract).
 - `openspec/changes/<name>/` — in-flight changes (proposal, design, tasks, delta specs);
   `openspec/changes/IMPLEMENTATION_ORDER.md` records the intended build sequence.
-- `openspec/future-capabilities.md` — preserved intent for deferred features.
+- `roadmap/` — status-tracked intent for deferred features (one file per idea).
 - `assets/seed/` — curated wordlists + User-Agent pool, seeded into the DB on first run.
 
 `openspec/specs/` (canon) and `openspec/changes/archive/` are **autocoder-owned**: do not

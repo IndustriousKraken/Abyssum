@@ -5,8 +5,8 @@ Raw capture for ideas that aren't ready to spec. Low ceremony — dump things he
 ## The funnel (where ideas go)
 
 1. **`TODO.md` (here)** — raw ideas, no structure required.
-2. **`openspec/future-capabilities.md`** — once an idea has a thesis-fit rationale and a rough
-   shape (intent captured, not yet buildable).
+2. **`roadmap/<slug>.md`** — once an idea has a thesis-fit rationale and a rough shape
+   (status-tracked intent, not yet buildable). Format in `OCTOPUS.md`.
 3. **`openspec/changes/<name>/`** — only when spec'd and buildable. Do **not** put raw ideas
    here; the build pipeline (octopus-autocoder) treats everything under `changes/` as work to
    build.
@@ -37,7 +37,7 @@ And it must serve the thesis: **slow, deep, thorough, stealthy, finds the occult
 ### Surfaces
 - [ ] Deep surface mapping — subdomain takeover, origin-IP discovery behind CDN/WAF,
       ASN/netblock enumeration, forgotten cloud assets. (ASN enum yes; BGP route manipulation
-      no.) → intent in `future-capabilities.md`.
+      no.) → in `roadmap/deep-surface-mapping.md`.
 - [ ] Recon phone-home box — standalone; powers the two-phase warn-then-breach engagement
       model. → intent captured.
 - [ ] Internal / red-team surface — separate private repo; integrate with Mythic/Sliver rather
@@ -48,7 +48,7 @@ And it must serve the thesis: **slow, deep, thorough, stealthy, finds the occult
 - [ ] Advanced detector evasion (behavioral WAF, AI-driven NDR) — claims only ever as specific,
       reproducible case reports, never blanket assertions.
 - [ ] Origin-bypass transport — reach the origin directly once it's discovered.
-- [ ] IP rotation / egress diversity → intent in `future-capabilities.md`.
+- [ ] IP rotation / egress diversity → in `roadmap/ip-rotation-egress.md`.
 
-> Promote an item to `future-capabilities.md` once its intent is clear; promote to a change
+> Promote an item to `roadmap/` once its intent is clear; promote to a change
 > folder only when it's ready to build.
