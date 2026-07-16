@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use abyssum_core::{Finding, ScanSession, Severity, Status, Target, User};
-use common::{enc, spawn_cors_mock, spawn_echo_mock, Client, TestApp};
+use common::{Client, TestApp, enc, spawn_cors_mock, spawn_echo_mock};
 use uuid::Uuid;
 
 /// Register an account (first registrant becomes admin) and return it.
@@ -722,9 +722,10 @@ async fn security_headers_are_set_on_every_response() {
     assert!(csp.contains("'unsafe-eval'") && csp.contains("frame-ancestors 'none'"));
     assert_eq!(resp.header("x-frame-options"), Some("DENY"));
     assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
-    assert!(resp
-        .header("strict-transport-security")
-        .is_some_and(|v| v.contains("max-age=")));
+    assert!(
+        resp.header("strict-transport-security")
+            .is_some_and(|v| v.contains("max-age="))
+    );
 }
 
 // --- polling helpers -------------------------------------------------------
@@ -738,21 +739,18 @@ async fn wait_for(timeout: Duration, mut condition: impl FnMut() -> bool) -> Res
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    if condition() {
-        Ok(())
-    } else {
-        Err(())
-    }
+    if condition() { Ok(()) } else { Err(()) }
 }
 
 /// Poll the persisted session until it reaches a terminal state with findings.
 async fn wait_for_session(app: &TestApp, id: Uuid, timeout: Duration) -> ScanSession {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Ok(Some(session)) = app.state.db.get_session(id).await {
-            if session.status.is_terminal() && !session.findings.is_empty() {
-                return session;
-            }
+        if let Ok(Some(session)) = app.state.db.get_session(id).await
+            && session.status.is_terminal()
+            && !session.findings.is_empty()
+        {
+            return session;
         }
         if tokio::time::Instant::now() >= deadline {
             return app

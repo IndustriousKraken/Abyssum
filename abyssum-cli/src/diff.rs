@@ -6,7 +6,7 @@
 //! malformed) session id is rejected as bad input — a non-zero exit — and no diff is
 //! produced.
 
-use abyssum_core::{diff_sessions, Config, DatabaseManager, ScanSession};
+use abyssum_core::{Config, DatabaseManager, ScanSession, diff_sessions};
 use uuid::Uuid;
 
 use crate::cli::{DiffArgs, OutputFormat};

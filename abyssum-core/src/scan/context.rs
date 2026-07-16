@@ -284,7 +284,7 @@ impl ScanContext {
             Pace::Halt => {
                 return Err(Error::Http(format!(
                     "pacing halted further requests to {host}: sustained target distress"
-                )))
+                )));
             }
             Pace::Proceed => {}
         }
@@ -299,14 +299,14 @@ impl ScanContext {
         }
         // Attach the context credential unless this request explicitly opts out
         // (a BAC/IDOR probe that must reach the target as an anonymous caller).
-        if !request.omit_credential {
-            if let Some(credential) = &self.auth {
-                if let Some(bearer) = &credential.bearer {
-                    builder = builder.bearer_auth(bearer);
-                }
-                if let Some(cookie) = &credential.cookie {
-                    builder = builder.header(COOKIE, cookie);
-                }
+        if !request.omit_credential
+            && let Some(credential) = &self.auth
+        {
+            if let Some(bearer) = &credential.bearer {
+                builder = builder.bearer_auth(bearer);
+            }
+            if let Some(cookie) = &credential.cookie {
+                builder = builder.header(COOKIE, cookie);
             }
         }
         if let Some(body) = request.body {

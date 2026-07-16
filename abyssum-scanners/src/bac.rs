@@ -569,12 +569,12 @@ fn evaluate(path: &str, response: &ProbeResponse, baseline: Option<&Baseline>) -
     // 3xx: a redirect to another sensitive location is worth following once; any
     // other redirect target is not, on its own, a finding.
     if (300..400).contains(&status) {
-        if let Some(location) = &response.location {
-            if is_sensitive_location(location) {
-                return Verdict::FollowRedirect {
-                    location: location.clone(),
-                };
-            }
+        if let Some(location) = &response.location
+            && is_sensitive_location(location)
+        {
+            return Verdict::FollowRedirect {
+                location: location.clone(),
+            };
         }
         return Verdict::NotExposed;
     }
@@ -589,10 +589,10 @@ fn evaluate(path: &str, response: &ProbeResponse, baseline: Option<&Baseline>) -
     if (200..300).contains(&status) {
         // A page served identically to the homepage is a catch-all, not the real
         // sensitive endpoint.
-        if let Some(baseline) = baseline {
-            if baseline.matches(response) {
-                return Verdict::NotExposed;
-            }
+        if let Some(baseline) = baseline
+            && baseline.matches(response)
+        {
+            return Verdict::NotExposed;
         }
         let (data, signals) = detect_sensitive_content(response);
         // A body that clearly leaks sensitive content — or is a recognizable admin
@@ -689,13 +689,13 @@ fn detect_sensitive_content(response: &ProbeResponse) -> (DataClass, Vec<String>
     }
 
     // A JSON collection of many records is a data-dump signal.
-    if is_json(response.content_type.as_deref()) && !response.truncated {
-        if let Some(count) = json_collection_len(&response.body) {
-            if count >= MIN_SENSITIVE_JSON_RECORDS {
-                class = class.max(DataClass::UserData);
-                push("multi_record_json", &mut signals);
-            }
-        }
+    if is_json(response.content_type.as_deref())
+        && !response.truncated
+        && let Some(count) = json_collection_len(&response.body)
+        && count >= MIN_SENSITIVE_JSON_RECORDS
+    {
+        class = class.max(DataClass::UserData);
+        push("multi_record_json", &mut signals);
     }
 
     // An admin-interface marker confirms a real admin UI was served (it does not, on
@@ -1252,16 +1252,20 @@ mod tests {
         assert_eq!(evidence["status"], 200);
         assert_eq!(evidence["endpoint_kind"], "admin");
         assert_eq!(evidence["data_class"], "credentials");
-        assert!(evidence["exposure_signals"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s == "db_password"));
+        assert!(
+            evidence["exposure_signals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == "db_password")
+        );
         assert_eq!(evidence["body_truncated"], false);
-        assert!(evidence["response_sample"]
-            .as_str()
-            .unwrap()
-            .contains("db_password"));
+        assert!(
+            evidence["response_sample"]
+                .as_str()
+                .unwrap()
+                .contains("db_password")
+        );
         // No redirect chain on a direct finding.
         assert!(evidence.get("redirected_from").is_none());
     }

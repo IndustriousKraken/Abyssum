@@ -33,17 +33,17 @@
 //!
 //! [`purge_expired`]: AuthManager::purge_expired
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use chrono::{DateTime, Duration, Utc};
-use rand::rngs::OsRng;
 use rand::RngCore;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use rand::rngs::OsRng;
 use sqlx::Row;
+use sqlx::sqlite::{SqlitePool, SqliteRow};
 use uuid::Uuid;
 
 use crate::config::{AuthConfig, Config};
-use crate::error::{db_err, Error, Result};
+use crate::error::{Error, Result, db_err};
 use crate::persistence::DatabaseManager;
 use crate::scan::ScanSession;
 
@@ -409,8 +409,7 @@ fn verify_password(password: &str, encoded: &str) -> bool {
 /// params (`m=4096,t=3,p=1`), which must match what [`hash_password`] emits so
 /// the dummy verify costs the same as a real one; the
 /// `dummy_hash_uses_default_params` test guards that.
-const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=4096,t=3,p=1$ra1p8llsgiBhwdjx9qzC0Q$FaAY9lkRGyYfSthvIZcFtecQpQaLm13BGq5F1+Q1sC8";
+const DUMMY_HASH: &str = "$argon2id$v=19$m=4096,t=3,p=1$ra1p8llsgiBhwdjx9qzC0Q$FaAY9lkRGyYfSthvIZcFtecQpQaLm13BGq5F1+Q1sC8";
 
 /// See [`DUMMY_HASH`].
 fn dummy_hash() -> &'static str {

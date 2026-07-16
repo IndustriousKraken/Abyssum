@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use abyssum_cli::{execute, Cli, OutputFormat};
+use abyssum_cli::{Cli, OutputFormat, execute};
 
 mod common;
 use common::{spawn_recording_cors_mock, write_config};

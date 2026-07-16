@@ -358,10 +358,10 @@ fn is_api_shaped(response: &ProbeResponse) -> bool {
 fn classify(response: &ProbeResponse, baseline: Option<&Baseline>) -> Classification {
     // Soft-404 first: a response matching the not-found baseline is absent even
     // when its status (e.g. 200) would otherwise read as present.
-    if let Some(baseline) = baseline {
-        if baseline.matches(response) {
-            return Classification::Absent;
-        }
+    if let Some(baseline) = baseline
+        && baseline.matches(response)
+    {
+        return Classification::Absent;
     }
     match response.status {
         401 | 403 => Classification::Protected,

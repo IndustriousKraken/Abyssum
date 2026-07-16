@@ -4,7 +4,7 @@
 //! session, proving the command renders a chosen format to stdout or a file and
 //! rejects an unknown session id with a non-zero exit (tasks 7.1 / 7.2).
 
-use abyssum_cli::{run_report, CliError, ReportArgs, ReportFormat, EXIT_SUCCESS};
+use abyssum_cli::{CliError, EXIT_SUCCESS, ReportArgs, ReportFormat, run_report};
 use abyssum_core::{
     DatabaseManager, Finding, ScanSession, SessionStatus, Severity, Status, Target,
 };
@@ -22,14 +22,16 @@ async fn seed(db_path: &std::path::Path) -> Uuid {
     );
     session.status = SessionStatus::Completed;
     let id = session.id;
-    session.findings = vec![Finding::builder(
-        "cors",
-        Target::parse("https://api.example.com").unwrap(),
-        "Permissive CORS",
-    )
-    .severity(Severity::High)
-    .status(Status::Vulnerable)
-    .build()];
+    session.findings = vec![
+        Finding::builder(
+            "cors",
+            Target::parse("https://api.example.com").unwrap(),
+            "Permissive CORS",
+        )
+        .severity(Severity::High)
+        .status(Status::Vulnerable)
+        .build(),
+    ];
     db.save_session(&session).await.unwrap();
     for finding in &session.findings {
         db.save_finding(id, finding).await.unwrap();

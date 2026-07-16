@@ -206,12 +206,11 @@ impl CustomRequestSpec {
         // Content-Type header themselves (respect a verbatim choice).
         if let Some(ct) = &self.content_type {
             set_header(&mut headers, "Content-Type", ct);
-        } else if !has_header(&headers, "content-type") {
-            if let Some(body) = &self.body {
-                if looks_like_json(body) {
-                    headers.push(("Content-Type".to_string(), "application/json".to_string()));
-                }
-            }
+        } else if !has_header(&headers, "content-type")
+            && let Some(body) = &self.body
+            && looks_like_json(body)
+        {
+            headers.push(("Content-Type".to_string(), "application/json".to_string()));
         }
 
         // A supplied bearer token supersedes any custom Authorization header.

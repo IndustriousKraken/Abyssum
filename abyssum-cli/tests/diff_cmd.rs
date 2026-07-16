@@ -4,7 +4,7 @@
 //! sessions, proving the command reports added / resolved / changed findings, and
 //! rejects an unknown session id with a non-zero exit (tasks 1 / 5).
 
-use abyssum_cli::{run_diff, CliError, DiffArgs, OutputFormat, EXIT_SUCCESS};
+use abyssum_cli::{CliError, DiffArgs, EXIT_SUCCESS, OutputFormat, run_diff};
 use abyssum_core::{
     DatabaseManager, Finding, ScanSession, SessionStatus, Severity, Status, Target,
 };

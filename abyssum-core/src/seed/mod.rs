@@ -21,7 +21,7 @@ pub mod store;
 pub mod user_agent;
 
 pub use assets::{
-    parse_user_agents, parse_wordlist, ParsedEntry, SeedUserAgent, WordlistAsset, WORDLISTS,
+    ParsedEntry, SeedUserAgent, WORDLISTS, WordlistAsset, parse_user_agents, parse_wordlist,
 };
 pub use store::{PooledUserAgent, ReferenceStore, WordlistEntry};
 pub use user_agent::RotatingUserAgent;
