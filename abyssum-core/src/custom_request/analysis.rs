@@ -231,9 +231,11 @@ mod tests {
     fn flags_stack_trace_body() {
         let body = "Traceback (most recent call last):\n  File ...\nException: boom";
         let signals = analyze(&response(hardened_headers(), body));
-        assert!(signals
-            .iter()
-            .any(|s| s.kind == SignalKind::ErrorDetailLeakage));
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.kind == SignalKind::ErrorDetailLeakage)
+        );
     }
 
     // --- Task 3.5 / 5.2: clean response yields no signals -------------------

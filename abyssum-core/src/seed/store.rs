@@ -13,7 +13,7 @@
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::error::{db_err, Result};
+use crate::error::{Result, db_err};
 
 use super::assets;
 

@@ -19,4 +19,4 @@ pub mod state;
 pub mod view;
 pub mod ws;
 
-pub use state::{build_router, default_static_dir, serve, AppState};
+pub use state::{AppState, build_router, default_static_dir, serve};

@@ -12,12 +12,15 @@ is centralized.
 
 ## Tasks
 
-- [ ] Set `edition = "2024"` in `[workspace.package]` in the root `Cargo.toml`.
-- [ ] Confirm the `rust-version` / toolchain in use supports the 2024 edition
+- [x] Set `edition = "2024"` in `[workspace.package]` in the root `Cargo.toml`.
+- [x] Confirm the `rust-version` / toolchain in use supports the 2024 edition
       (Rust 1.85+); add or update a `rust-toolchain.toml` / `rust-version` pin if
-      the repo relies on one.
-- [ ] Run `cargo fix --edition` if needed and address any 2024 idiom/migration
+      the repo relies on one. (Toolchain is 1.95.0; repo pins no toolchain file and
+      declares no `rust-version`, so none was added.)
+- [x] Run `cargo fix --edition` if needed and address any 2024 idiom/migration
       lints across all four crates (`abyssum-core`, `abyssum-scanners`,
-      `abyssum-cli`, `abyssum-web`).
-- [ ] Ensure `cargo build`, `cargo test`, and `cargo clippy --all-targets` pass on
+      `abyssum-cli`, `abyssum-web`). (No `cargo fix --edition` changes were needed
+      to compile; applied `cargo clippy --fix` for the 37 `collapsible_if` lints
+      newly enabled by let-chain stabilization.)
+- [x] Ensure `cargo build`, `cargo test`, and `cargo clippy --all-targets` pass on
       the new edition.

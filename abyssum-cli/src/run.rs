@@ -11,15 +11,15 @@
 use std::sync::Arc;
 
 use abyssum_core::{
-    logging, CancellationToken, Config, Credential, DatabaseManager, Identity, Orchestrator,
+    CancellationToken, Config, Credential, DatabaseManager, Identity, Orchestrator,
     ProgressCallback, ProgressKind, ProgressUpdate, ReferenceStore, ScanSession, ScannerRegistry,
-    SessionStatus, Target,
+    SessionStatus, Target, logging,
 };
 use abyssum_scanners::register_builtins;
 use uuid::Uuid;
 
 use crate::cli::Cli;
-use crate::config_overlay::{apply_overrides, Overrides};
+use crate::config_overlay::{Overrides, apply_overrides};
 use crate::{render, validate};
 
 /// Process exit code: the scan completed.
@@ -221,7 +221,7 @@ fn parse_identity(spec: &str) -> Result<Identity, String> {
             other => {
                 return Err(format!(
                     "unknown identity field {other:?} in {spec:?} (expected 'cookie' or 'bearer')"
-                ))
+                ));
             }
         }
     }

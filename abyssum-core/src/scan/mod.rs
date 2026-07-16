@@ -29,10 +29,10 @@ pub mod session;
 pub mod target;
 
 pub use context::{
-    Credential, Method, RequestSpec, ScanContext, SingleUserAgent, UserAgentSource,
-    DEFAULT_USER_AGENT,
+    Credential, DEFAULT_USER_AGENT, Method, RequestSpec, ScanContext, SingleUserAgent,
+    UserAgentSource,
 };
-pub use differential::{run_differential, Identity};
+pub use differential::{Identity, run_differential};
 pub use finding::{Finding, FindingBuilder, FindingId, Severity, Status};
 pub use orchestrator::{Orchestrator, SessionHandle};
 pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};

@@ -97,13 +97,13 @@ pub fn parse_wordlist(asset: &WordlistAsset) -> Vec<ParsedEntry> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
-            if asset.labeled {
-                if let Some((label, body)) = line.split_once('|') {
-                    return ParsedEntry {
-                        value: body.trim().to_string(),
-                        label: Some(label.trim().to_string()),
-                    };
-                }
+            if asset.labeled
+                && let Some((label, body)) = line.split_once('|')
+            {
+                return ParsedEntry {
+                    value: body.trim().to_string(),
+                    label: Some(label.trim().to_string()),
+                };
             }
             ParsedEntry {
                 value: line.to_string(),
@@ -177,10 +177,12 @@ mod tests {
             assert!(entry.label.as_deref() != Some(""), "empty label");
         }
         // A known curated query is present with its label preserved.
-        assert!(entries
-            .iter()
-            .any(|e| e.label.as_deref() == Some("Introspection Query")
-                && e.value.contains("__schema")));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.label.as_deref() == Some("Introspection Query")
+                    && e.value.contains("__schema"))
+        );
     }
 
     #[test]
@@ -199,11 +201,13 @@ mod tests {
         assert!(uas.iter().any(|u| u.realistic), "no realistic UA");
         assert!(uas.iter().any(|u| !u.realistic), "no opt-in-only UA");
         // Spot-check a realistic browser identity and a scanner-announcing one.
-        assert!(uas
-            .iter()
-            .any(|u| u.realistic && u.value.contains("Chrome")));
-        assert!(uas
-            .iter()
-            .any(|u| !u.realistic && u.value.contains("Abyssum")));
+        assert!(
+            uas.iter()
+                .any(|u| u.realistic && u.value.contains("Chrome"))
+        );
+        assert!(
+            uas.iter()
+                .any(|u| !u.realistic && u.value.contains("Abyssum"))
+        );
     }
 }

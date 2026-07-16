@@ -19,8 +19,8 @@ use rand::Rng;
 
 use crate::config::UserAgentRotation;
 use crate::error::Result;
-use crate::scan::context::DEFAULT_USER_AGENT;
 use crate::scan::UserAgentSource;
+use crate::scan::context::DEFAULT_USER_AGENT;
 
 use super::store::ReferenceStore;
 

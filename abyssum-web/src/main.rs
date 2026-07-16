@@ -6,7 +6,7 @@
 
 use std::process::ExitCode;
 
-use abyssum_core::{logging, Config};
+use abyssum_core::{Config, logging};
 use clap::Parser;
 
 /// Abyssum web surface (interactive UI with live scan progress).

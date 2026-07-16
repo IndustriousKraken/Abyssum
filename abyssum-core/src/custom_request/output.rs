@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::str::FromStr;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::response::{CaptureResult, RequestOutcome};
 

@@ -26,8 +26,8 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use sha1::{Digest, Sha1};
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::Role;
 use uuid::Uuid;
 
 use crate::view;

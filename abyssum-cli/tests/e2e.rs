@@ -6,7 +6,7 @@
 //! stored, its findings survive reopening the store, and the table / JSON / CSV
 //! renderings all reflect the same findings (tasks 5.2 and 8.1).
 
-use abyssum_cli::{execute, render, Cli, OutputFormat};
+use abyssum_cli::{Cli, OutputFormat, execute, render};
 use abyssum_core::{DatabaseManager, Finding, SessionStatus};
 
 mod common;

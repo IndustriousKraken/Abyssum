@@ -23,7 +23,7 @@ use abyssum_core::{
     BaseScanner, Config, DatabaseManager, Orchestrator, RateLimiter, ScanContext, ScannerRegistry,
     SessionStatus, Severity, SingleUserAgent, Status, Target,
 };
-use abyssum_scanners::{register_builtins, GraphqlScanner};
+use abyssum_scanners::{GraphqlScanner, register_builtins};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -133,10 +133,10 @@ async fn handle_conn(
         log.len()
     };
 
-    if let Some((n, token)) = &cancel_after {
-        if count >= *n {
-            token.cancel();
-        }
+    if let Some((n, token)) = &cancel_after
+        && count >= *n
+    {
+        token.cancel();
     }
 
     let req = Req { method, path, body };
@@ -225,10 +225,10 @@ fn header_in(head: &str, name: &str) -> Option<String> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case(name) {
-                return Some(value.trim().to_string());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case(name)
+        {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -373,30 +373,40 @@ async fn detects_endpoint_and_reports_introspection_with_schema_evidence() {
 
     let evidence = introspection.evidence.as_ref().unwrap();
     assert_eq!(evidence["types_count"], 6);
-    assert!(evidence["query_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f == "users"));
-    assert!(evidence["mutation_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f == "login"));
-    assert!(evidence["sensitive_types"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|t| t == "Password"));
+    assert!(
+        evidence["query_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "users")
+    );
+    assert!(
+        evidence["mutation_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "login")
+    );
+    assert!(
+        evidence["sensitive_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "Password")
+    );
 
     // The detected endpoint also exposes batching, unbounded depth, and discloses
     // user data — so the overall (max) severity is critical (the password leak).
-    assert!(findings
-        .iter()
-        .any(|f| f.evidence.as_ref().unwrap()["check"] == "batching"));
-    assert!(findings
-        .iter()
-        .any(|f| f.evidence.as_ref().unwrap()["check"] == "query_depth"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.evidence.as_ref().unwrap()["check"] == "batching")
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.evidence.as_ref().unwrap()["check"] == "query_depth")
+    );
     let disclosure = findings
         .iter()
         .find(|f| f.evidence.as_ref().unwrap()["check"] == "information_disclosure")
@@ -541,9 +551,11 @@ async fn emits_progress_updates() {
     assert!(!updates.is_empty(), "progress updates are emitted");
     assert!(updates.iter().all(|u| u.scanner_id == "graphql"));
     // Each update names what it tested out of a total, and the current item.
-    assert!(updates
-        .iter()
-        .all(|u| u.total_items > 0 && u.current_item.is_some()));
+    assert!(
+        updates
+            .iter()
+            .all(|u| u.total_items > 0 && u.current_item.is_some())
+    );
 }
 
 /// Tasks 1.3 + 2.1 + 2.2: the scanner registers under its stable id, loads its
@@ -593,9 +605,11 @@ async fn registered_scanner_loads_seeded_lists_and_runs_via_orchestrator() {
     let mut registry = ScannerRegistry::new(config.clone());
     register_builtins(&mut registry, &store);
     assert!(registry.contains(GraphqlScanner::ID));
-    assert!(registry
-        .available()
-        .contains(&GraphqlScanner::ID.to_string()));
+    assert!(
+        registry
+            .available()
+            .contains(&GraphqlScanner::ID.to_string())
+    );
     let created = registry.create("graphql").unwrap();
     assert_eq!(created.id(), "graphql");
 

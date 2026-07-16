@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::rate_limiter::RateLimiter;
 
-use super::context::{build_engine_http_client, Credential, ScanContext, UserAgentSource};
+use super::context::{Credential, ScanContext, UserAgentSource, build_engine_http_client};
 use super::progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 use super::registry::ScannerRegistry;
 use super::session::{ScanSession, SessionStatus};
@@ -77,11 +77,11 @@ impl Drop for RunGuard<'_> {
         // finds it. The scan panic happens with no session lock held, so the
         // lock is not poisoned; guard against poisoning anyway.
         self.active.lock().unwrap().remove(&self.session_id);
-        if let Ok(mut s) = self.session.lock() {
-            if !s.status.is_terminal() {
-                s.finished_at = Some(Utc::now());
-                s.status = SessionStatus::Errored;
-            }
+        if let Ok(mut s) = self.session.lock()
+            && !s.status.is_terminal()
+        {
+            s.finished_at = Some(Utc::now());
+            s.status = SessionStatus::Errored;
         }
     }
 }

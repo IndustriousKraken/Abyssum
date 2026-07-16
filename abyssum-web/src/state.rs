@@ -16,15 +16,15 @@ use abyssum_core::{
     ScannerRegistry,
 };
 use abyssum_scanners::register_builtins;
+use axum::Router;
 use axum::extract::Request;
 use axum::http::HeaderValue;
-use axum::middleware::{from_fn, from_fn_with_state, Next};
+use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::Router;
 use tower_http::services::ServeDir;
 
-use crate::auth::{require_user_data, require_user_page, LoginLimiter};
+use crate::auth::{LoginLimiter, require_user_data, require_user_page};
 use crate::handlers;
 use crate::ws::Hub;
 

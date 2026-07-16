@@ -24,7 +24,7 @@ use abyssum_core::{
     BaseScanner, Config, Credential, DatabaseManager, Orchestrator, RateLimiter, ScanContext,
     ScannerRegistry, SessionStatus, Severity, SingleUserAgent, Status, Target,
 };
-use abyssum_scanners::{register_builtins, IdorScanner};
+use abyssum_scanners::{IdorScanner, register_builtins};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -145,10 +145,10 @@ async fn handle_conn(
     };
 
     // Fire cancellation before responding, so the in-flight scan sees it next.
-    if let Some((n, token)) = &cancel_after {
-        if count >= *n {
-            token.cancel();
-        }
+    if let Some((n, token)) = &cancel_after
+        && count >= *n
+    {
+        token.cancel();
     }
 
     let route = routes.get(&request_target).cloned().unwrap_or(default);
@@ -201,10 +201,10 @@ fn header_in(head: &str, name: &str) -> Option<String> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case(name) {
-                return Some(value.trim().to_string());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case(name)
+        {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -299,15 +299,19 @@ async fn harvests_baseline_then_reports_only_the_vulnerable_reference() {
     assert_eq!(evidence["endpoint"], "/api/users/43");
     assert_eq!(evidence["status"], 200);
     assert_eq!(evidence["data_class"], "credentials");
-    assert!(evidence["sensitive_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f == "password"));
-    assert!(evidence["response_sample"]
-        .as_str()
-        .unwrap()
-        .contains("bob"));
+    assert!(
+        evidence["sensitive_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "password")
+    );
+    assert!(
+        evidence["response_sample"]
+            .as_str()
+            .unwrap()
+            .contains("bob")
+    );
 }
 
 /// Task 5.3 + spec "Identical response is not a finding": a non-baseline reference

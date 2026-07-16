@@ -183,9 +183,11 @@ async fn forwards_progress_with_tested_total_and_current() {
         "expected a mid-run update carrying tested/total/current: {updates:?}"
     );
     // And the final unit update reaching 2/2.
-    assert!(updates
-        .iter()
-        .any(|u| u.items_completed == 2 && u.total_items == 2));
+    assert!(
+        updates
+            .iter()
+            .any(|u| u.items_completed == 2 && u.total_items == 2)
+    );
 
     // The orchestrator's per-unit updates are tagged `Unit` and the stub's own
     // probe updates `ScannerInternal`, so a consumer (e.g. the CLI's log-level
