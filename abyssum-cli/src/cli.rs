@@ -48,6 +48,15 @@ pub struct Cli {
     )]
     pub scanners: Vec<String>,
 
+    /// A named identity to scan as, `label[:cookie=VALUE][:bearer=TOKEN]`.
+    /// Repeatable. A bare `label` (no credential) is the anonymous identity. Supply
+    /// **two or more** to trigger an auth-differential run: the selected scanners
+    /// run once per identity and access-control divergence is reported. A single
+    /// identity is an ordinary scan carrying that identity's credential. Cookie and
+    /// bearer values must not contain a colon.
+    #[arg(long = "identity", value_name = "SPEC", action = clap::ArgAction::Append)]
+    pub identities: Vec<String>,
+
     /// Minimum inter-request delay, in seconds. Overrides the configured value for
     /// this run, but never paces below the configured floor (see the project's
     /// stealth philosophy).
@@ -269,6 +278,38 @@ mod tests {
     fn report_requires_a_session_id() {
         let err = Cli::try_parse_from(["abyssum", "report"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `--identity` is repeatable and captures each raw spec verbatim (parsing of
+    /// the `label:cookie=…:bearer=…` form happens in the run layer).
+    #[test]
+    fn parses_repeatable_identities() {
+        let cli = Cli::try_parse_from([
+            "abyssum",
+            "--targets",
+            "a.test",
+            "--scanners",
+            "rest_discovery",
+            "--identity",
+            "alice:bearer=tok-a",
+            "--identity",
+            "bob:cookie=session=b",
+            "--identity",
+            "guest",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.identities,
+            vec!["alice:bearer=tok-a", "bob:cookie=session=b", "guest"]
+        );
+    }
+
+    /// Omitting `--identity` leaves the list empty (an ordinary, credential-free scan).
+    #[test]
+    fn identities_default_empty() {
+        let cli =
+            Cli::try_parse_from(["abyssum", "--targets", "a.test", "--scanners", "cors"]).unwrap();
+        assert!(cli.identities.is_empty());
     }
 
     /// Pacing and log-level overrides parse into their option fields.
