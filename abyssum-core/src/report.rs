@@ -191,7 +191,7 @@ fn consolidate_and_rank<'a>(
     let mut ranked: Vec<RankedFinding<'a>> = Vec::new();
     let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
     for finding in findings {
-        match seen.entry(finding_key(finding)) {
+        match seen.entry(finding.consolidation_key()) {
             Entry::Occupied(e) => ranked[*e.get()].occurrences += 1,
             Entry::Vacant(e) => {
                 e.insert(ranked.len());
@@ -210,17 +210,6 @@ fn consolidate_and_rank<'a>(
         )
     });
     ranked
-}
-
-/// The stable key identifying "the same issue": the producing scanner, the
-/// normalized target endpoint (the URL's canonical string form), and the finding's
-/// title (its class).
-fn finding_key(finding: &Finding) -> (String, String, String) {
-    (
-        finding.scanner_id.clone(),
-        finding.target.full_url().to_string(),
-        finding.title.clone(),
-    )
 }
 
 /// Rank a status for importance ordering: vulnerable (2) above safe (1) above

@@ -122,6 +122,33 @@ pub enum OutputFormat {
 pub enum Command {
     /// Generate a report for one or more stored scan sessions.
     Report(ReportArgs),
+    /// Diff two stored scan sessions, reporting what changed between them.
+    Diff(DiffArgs),
+}
+
+/// Arguments to the `diff` subcommand.
+#[derive(Debug, Clone, Args)]
+pub struct DiffArgs {
+    /// The older (baseline) session id.
+    #[arg(value_name = "OLDER_SESSION")]
+    pub older: String,
+
+    /// The newer session id to compare against the baseline.
+    #[arg(value_name = "NEWER_SESSION")]
+    pub newer: String,
+
+    /// Output format for the diff.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub output: OutputFormat,
+
+    /// Path to the YAML configuration file (locates the result store).
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "ABYSSUM_CONFIG",
+        default_value = "abyssum.yaml"
+    )]
+    pub config: String,
 }
 
 /// Arguments to the `report` subcommand.

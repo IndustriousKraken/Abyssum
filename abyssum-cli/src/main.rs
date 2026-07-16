@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use abyssum_cli::{execute, run_report, Cli, Command};
+use abyssum_cli::{execute, run_diff, run_report, Cli, Command};
 use clap::Parser;
 
 #[tokio::main]
@@ -20,6 +20,7 @@ async fn main() -> ExitCode {
     // (the default) runs a scan. Both paths yield a (rendered, exit_code) pair.
     let result = match cli.command.take() {
         Some(Command::Report(args)) => run_report(args).await.map(|o| (o.rendered, o.exit_code)),
+        Some(Command::Diff(args)) => run_diff(args).await.map(|o| (o.rendered, o.exit_code)),
         None => execute(cli).await.map(|o| (o.rendered, o.exit_code)),
     };
 
