@@ -12,6 +12,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -45,6 +46,43 @@ pub async fn spawn_cors_mock() -> SocketAddr {
         }
     });
     addr
+}
+
+/// Like [`spawn_cors_mock`], but records the raw request head (request line +
+/// headers) of every request it answers, so a test can assert which credential
+/// headers reached the target. Returns the bound address and the shared log.
+pub async fn spawn_recording_cors_mock() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = log.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                // Record before responding, so the head is logged by the time the
+                // scanner (which awaits the response) sees the request complete.
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let response = "HTTP/1.1 200 OK\r\n\
+                     Access-Control-Allow-Origin: *\r\n\
+                     Access-Control-Allow-Credentials: true\r\n\
+                     Content-Length: 0\r\n\
+                     Connection: close\r\n\
+                     \r\n";
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            });
+        }
+    });
+    (addr, log)
 }
 
 /// Write a config that points the store at `db_path` and drops the pacing floor to

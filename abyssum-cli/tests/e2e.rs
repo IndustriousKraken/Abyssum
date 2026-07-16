@@ -24,6 +24,8 @@ async fn full_run_persists_session_and_all_formats_agree() {
         targets: vec![format!("http://{addr}")],
         scanners: vec!["cors".to_string()],
         identities: vec![],
+        cookie: None,
+        bearer: None,
         min_delay: None,
         max_delay: None,
         log_level: None,

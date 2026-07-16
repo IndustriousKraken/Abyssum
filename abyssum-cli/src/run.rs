@@ -128,9 +128,11 @@ pub async fn execute(cli: Cli) -> Result<RunOutcome, CliError> {
     }
 
     // 6. Create a session for the targets/scanners and run it through the shared
-    //    engine, draining progress and honoring Ctrl-C. A single supplied identity
-    //    attaches its credential to every scanner's requests.
-    let credential = identities.into_iter().next().and_then(|id| id.credential);
+    //    engine, draining progress and honoring Ctrl-C. A credential from the
+    //    `--cookie`/`--bearer` flags (or, failing that, a single supplied identity)
+    //    is attached to every scanner's requests; BAC/IDOR strip it per-request.
+    let credential = flag_credential(cli.cookie.clone(), cli.bearer.clone())
+        .or_else(|| identities.into_iter().next().and_then(|id| id.credential));
     let registry = build_registry(&config, &store);
     let mut orchestrator = Orchestrator::new(config, registry);
     if let Some(credential) = credential {
@@ -179,6 +181,16 @@ fn build_registry(config: &Arc<Config>, store: &ReferenceStore) -> ScannerRegist
     let mut registry = ScannerRegistry::new(config.clone());
     register_builtins(&mut registry, store);
     registry
+}
+
+/// Build a [`Credential`] from the `--cookie` / `--bearer` flags. The two are
+/// independent; `None` only when neither is supplied — the scan then runs
+/// unauthenticated (unchanged behavior).
+fn flag_credential(cookie: Option<String>, bearer: Option<String>) -> Option<Credential> {
+    match (bearer, cookie) {
+        (None, None) => None,
+        (bearer, cookie) => Some(Credential { bearer, cookie }),
+    }
 }
 
 /// Parse each `--identity` spec into an [`Identity`]. A spec is
@@ -378,6 +390,24 @@ mod tests {
         assert!(parse_identity("alice:token").is_err());
         // An unknown field name.
         assert!(parse_identity("alice:token=t").is_err());
+    }
+
+    #[test]
+    fn flag_credential_builds_from_either_flag() {
+        // Neither flag → no credential (unauthenticated scan).
+        assert!(flag_credential(None, None).is_none());
+        // Cookie only.
+        let c = flag_credential(Some("session=abc".into()), None).unwrap();
+        assert_eq!(c.cookie.as_deref(), Some("session=abc"));
+        assert!(c.bearer.is_none());
+        // Bearer only.
+        let c = flag_credential(None, Some("tok".into())).unwrap();
+        assert_eq!(c.bearer.as_deref(), Some("tok"));
+        assert!(c.cookie.is_none());
+        // Both.
+        let c = flag_credential(Some("session=abc".into()), Some("tok".into())).unwrap();
+        assert_eq!(c.cookie.as_deref(), Some("session=abc"));
+        assert_eq!(c.bearer.as_deref(), Some("tok"));
     }
 
     #[test]
