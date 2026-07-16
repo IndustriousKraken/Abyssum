@@ -28,9 +28,9 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
 
-use crate::auth::{visible_session, User};
-use crate::error::{db_err, Error, Result};
-use crate::persistence::{escape_like, row_to_session, DatabaseManager, DEFAULT_SEARCH_LIMIT};
+use crate::auth::{User, visible_session};
+use crate::error::{Error, Result, db_err};
+use crate::persistence::{DEFAULT_SEARCH_LIMIT, DatabaseManager, escape_like, row_to_session};
 use crate::scan::{FindingId, ScanSession};
 
 /// The default tag color (neutral gray) assigned when a tag is created without an
@@ -423,10 +423,10 @@ impl AnnotationStore {
         // Normalize + dedup the requested names.
         let mut names: Vec<String> = Vec::new();
         for raw in tag_names {
-            if let Ok(name) = normalize_tag_name(raw) {
-                if !names.contains(&name) {
-                    names.push(name);
-                }
+            if let Ok(name) = normalize_tag_name(raw)
+                && !names.contains(&name)
+            {
+                names.push(name);
             }
         }
         if names.is_empty() {
@@ -536,11 +536,7 @@ const SESSION_PROJECTION: &str = "s.session_id, s.status, s.targets_json, s.scan
 /// `None` for an admin (sees all owners), `Some(id)` to scope to the user's own
 /// sessions.
 fn owner_filter(user: &User) -> Option<i64> {
-    if user.is_admin() {
-        None
-    } else {
-        Some(user.id)
-    }
+    if user.is_admin() { None } else { Some(user.id) }
 }
 
 /// Trim note content and reject empty/whitespace-only input.

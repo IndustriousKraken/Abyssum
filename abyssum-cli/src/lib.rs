@@ -27,10 +27,10 @@ pub mod run;
 pub mod validate;
 
 pub use cli::{Cli, Command, DiffArgs, OutputFormat, ReportArgs, ReportFormat};
-pub use config_overlay::{apply_overrides, Overrides};
+pub use config_overlay::{Overrides, apply_overrides};
 pub use diff::run_diff;
-pub use report::{run_report, ReportOutcome};
+pub use report::{ReportOutcome, run_report};
 pub use run::{
-    execute, CliError, RunOutcome, EXIT_BAD_INPUT, EXIT_INTERRUPTED, EXIT_SCAN_FAILURE,
-    EXIT_SUCCESS,
+    CliError, EXIT_BAD_INPUT, EXIT_INTERRUPTED, EXIT_SCAN_FAILURE, EXIT_SUCCESS, RunOutcome,
+    execute,
 };

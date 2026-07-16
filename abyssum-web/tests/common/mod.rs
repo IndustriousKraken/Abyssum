@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use abyssum_core::Config;
-use abyssum_web::{build_router, AppState};
+use abyssum_web::{AppState, build_router};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

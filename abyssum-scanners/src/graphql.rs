@@ -394,12 +394,12 @@ impl BaseScanner for GraphqlScanner {
         let intro_query = introspection_query(&queries);
         match self.probe_query(ctx, &endpoint, &intro_query).await {
             Ok(resp) => {
-                if resp.status == 200 {
-                    if let Some(evidence) = extract_schema(&resp.body) {
-                        findings.push(build_introspection_finding(
-                            target, &endpoint, &evidence, &resp,
-                        ));
-                    }
+                if resp.status == 200
+                    && let Some(evidence) = extract_schema(&resp.body)
+                {
+                    findings.push(build_introspection_finding(
+                        target, &endpoint, &evidence, &resp,
+                    ));
                 }
                 done += 1;
                 ctx.report_progress(check_progress(done, total_checks, "introspection"));
@@ -436,12 +436,11 @@ impl BaseScanner for GraphqlScanner {
         }
         match self.probe_raw(ctx, &endpoint, batch_body()).await {
             Ok(resp) => {
-                if resp.status == 200 {
-                    if let Some(len) = batch_response_len(&resp.body) {
-                        if len == BATCH_PROBE.len() {
-                            findings.push(build_batching_finding(target, &endpoint, len, &resp));
-                        }
-                    }
+                if resp.status == 200
+                    && let Some(len) = batch_response_len(&resp.body)
+                    && len == BATCH_PROBE.len()
+                {
+                    findings.push(build_batching_finding(target, &endpoint, len, &resp));
                 }
                 done += 1;
                 ctx.report_progress(check_progress(done, total_checks, "batching"));
@@ -460,18 +459,18 @@ impl BaseScanner for GraphqlScanner {
             }
             match self.probe_query(ctx, &endpoint, &query.body).await {
                 Ok(resp) => {
-                    if resp.status == 200 {
-                        if let Some(data) = response_data(&resp.body) {
-                            let disclosure = analyze_disclosure(&data);
-                            if disclosure.class != DataClass::None {
-                                findings.push(build_disclosure_finding(
-                                    target,
-                                    &endpoint,
-                                    &query.label,
-                                    &disclosure,
-                                    &resp,
-                                ));
-                            }
+                    if resp.status == 200
+                        && let Some(data) = response_data(&resp.body)
+                    {
+                        let disclosure = analyze_disclosure(&data);
+                        if disclosure.class != DataClass::None {
+                            findings.push(build_disclosure_finding(
+                                target,
+                                &endpoint,
+                                &query.label,
+                                &disclosure,
+                                &resp,
+                            ));
                         }
                     }
                     done += 1;
@@ -700,23 +699,23 @@ struct ProbeResponse {
 /// any real GraphQL response is already caught by the JSON envelope or the strong
 /// signals above.
 fn looks_like_graphql(status: u16, content_type: Option<&str>, body: &[u8]) -> bool {
-    if let Some(ct) = content_type {
-        if ct.to_ascii_lowercase().contains("graphql") {
-            return true;
-        }
+    if let Some(ct) = content_type
+        && ct.to_ascii_lowercase().contains("graphql")
+    {
+        return true;
     }
 
     const GRAPHQL_STATUSES: &[u16] = &[200, 400, 401, 403, 405, 501];
-    if GRAPHQL_STATUSES.contains(&status) {
-        if let Ok(value) = serde_json::from_slice::<Value>(body) {
-            if value.get("data").is_some() || value.get("errors").is_some() {
-                return true;
-            }
-            if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
-                if mentions_graphql_error(message) {
-                    return true;
-                }
-            }
+    if GRAPHQL_STATUSES.contains(&status)
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
+        if value.get("data").is_some() || value.get("errors").is_some() {
+            return true;
+        }
+        if let Some(message) = value.get("message").and_then(|m| m.as_str())
+            && mentions_graphql_error(message)
+        {
+            return true;
         }
     }
 
@@ -1446,16 +1445,20 @@ mod tests {
         let json = finding.evidence.unwrap();
         assert_eq!(json["check"], "introspection");
         assert_eq!(json["types_count"], 6);
-        assert!(json["query_fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f == "users"));
-        assert!(json["sensitive_types"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t == "Password"));
+        assert!(
+            json["query_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "users")
+        );
+        assert!(
+            json["sensitive_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "Password")
+        );
     }
 
     #[test]

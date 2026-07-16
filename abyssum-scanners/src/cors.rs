@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use reqwest::header::{
-    HeaderName, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN,
+    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, HeaderName, ORIGIN,
 };
 use url::Url;
 
@@ -640,11 +640,13 @@ mod tests {
     #[test]
     fn null_probe_with_non_null_acao_is_not_a_finding() {
         // A null probe that gets a fixed, unrelated ACAO back is sound.
-        assert!(classify(
-            &null(),
-            &obs(Some("https://app.trusted.example"), Some("true"))
-        )
-        .is_none());
+        assert!(
+            classify(
+                &null(),
+                &obs(Some("https://app.trusted.example"), Some("true"))
+            )
+            .is_none()
+        );
     }
 
     /// Task 4.4 / spec: credentialed exposure always outranks the same

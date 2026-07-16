@@ -111,10 +111,12 @@ async fn finding_note_is_scoped_to_its_finding() {
 
     // A note targeting a finding that does not belong to the session is rejected.
     let other_sid = owned_session(&db, alice.id, "https://b.test").await;
-    assert!(notes
-        .add_note(&alice, other_sid, Some(fid), "wrong session")
-        .await
-        .is_err());
+    assert!(
+        notes
+            .add_note(&alice, other_sid, Some(fid), "wrong session")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -188,10 +190,12 @@ async fn explicit_create_rejects_duplicate_and_bad_color() {
         .await
         .unwrap();
     // A second create with the same normalized name is rejected.
-    assert!(notes
-        .create_tag("IDOR", Some("#445566"), None)
-        .await
-        .is_err());
+    assert!(
+        notes
+            .create_tag("IDOR", Some("#445566"), None)
+            .await
+            .is_err()
+    );
     // A malformed color is rejected.
     assert!(notes.create_tag("ssrf", Some("red"), None).await.is_err());
     // Only the one tag exists.

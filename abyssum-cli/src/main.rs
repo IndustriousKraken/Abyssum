@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use abyssum_cli::{execute, run_diff, run_report, Cli, Command};
+use abyssum_cli::{Cli, Command, execute, run_diff, run_report};
 use clap::Parser;
 
 #[tokio::main]

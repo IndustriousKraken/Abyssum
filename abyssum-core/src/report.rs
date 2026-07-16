@@ -444,12 +444,12 @@ fn render_markdown(session: &ScanSession, options: ReportOptions) -> String {
             out.push_str(description);
             out.push_str("\n\n");
         }
-        if options.include_evidence {
-            if let Some(evidence) = &finding.evidence {
-                out.push_str("**Evidence:**\n\n```json\n");
-                out.push_str(&pretty_evidence(evidence));
-                out.push_str("\n```\n\n");
-            }
+        if options.include_evidence
+            && let Some(evidence) = &finding.evidence
+        {
+            out.push_str("**Evidence:**\n\n```json\n");
+            out.push_str(&pretty_evidence(evidence));
+            out.push_str("\n```\n\n");
         }
         out.push_str(&format!("**Remediation:** {}\n\n", remediation(finding)));
     }
@@ -667,17 +667,15 @@ fn render_hackerone(session: &ScanSession, options: ReportOptions) -> Result<Str
 /// when present and evidence is included; otherwise a generic re-run instruction.
 fn steps_to_reproduce(finding: &Finding, include_evidence: bool) -> String {
     let endpoint = finding.target.full_url();
-    if include_evidence {
-        if let Some(evidence) = &finding.evidence {
-            let request = match evidence.get("method").and_then(|m| m.as_str()) {
-                Some(method) => format!("1. Send a `{method}` request to `{endpoint}`."),
-                None => format!("1. Send a request to `{endpoint}`."),
-            };
-            return format!(
-                "{request}\n2. Observe the response — the `{}` check flags: {}.",
-                finding.scanner_id, finding.title
-            );
-        }
+    if include_evidence && let Some(evidence) = &finding.evidence {
+        let request = match evidence.get("method").and_then(|m| m.as_str()) {
+            Some(method) => format!("1. Send a `{method}` request to `{endpoint}`."),
+            None => format!("1. Send a request to `{endpoint}`."),
+        };
+        return format!(
+            "{request}\n2. Observe the response — the `{}` check flags: {}.",
+            finding.scanner_id, finding.title
+        );
     }
     format!(
         "Re-run the `{}` check against `{endpoint}` to re-observe this issue.",

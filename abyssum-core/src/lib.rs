@@ -31,26 +31,26 @@ pub mod scan;
 pub mod seed;
 
 pub use ai::analyze_finding;
-pub use annotations::{AnnotationStore, Note, Tag, TagApply, TagUsage, DEFAULT_TAG_COLOR};
-pub use auth::{visible_session, visible_sessions, AuthManager, Role, User};
+pub use annotations::{AnnotationStore, DEFAULT_TAG_COLOR, Note, Tag, TagApply, TagUsage};
+pub use auth::{AuthManager, Role, User, visible_session, visible_sessions};
 pub use config::{AiConfig, AuthConfig, Config, UserAgentRotation};
 pub use custom_request::{
-    analyze, execute as execute_custom_request, normalize_url, CaptureResult, CapturedResponse,
-    CustomRequestSpec, OutputFormat, PreparedRequest, RequestOutcome, Signal, SignalKind,
-    DEFAULT_BODY_PREVIEW_CAP, DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
+    CaptureResult, CapturedResponse, CustomRequestSpec, DEFAULT_BODY_PREVIEW_CAP,
+    DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT, OutputFormat, PreparedRequest, RequestOutcome, Signal,
+    SignalKind, analyze, execute as execute_custom_request, normalize_url,
 };
-pub use diff::{diff_sessions, ChangedEntry, DiffEntry, SessionDiff};
+pub use diff::{ChangedEntry, DiffEntry, SessionDiff, diff_sessions};
 pub use error::{Error, Result};
 pub use persistence::{
-    DatabaseManager, FindingFilter, Summary, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
+    DEFAULT_SEARCH_LIMIT, DatabaseManager, FindingFilter, MAX_SEARCH_LIMIT, Summary,
 };
 pub use rate_limiter::{Pace, RateLimiter};
 pub use report::{ReportFormat, ReportGenerator, ReportOptions};
 pub use scan::{
-    run_differential, BaseScanner, Credential, Finding, FindingBuilder, FindingId, Identity,
-    Method, Orchestrator, ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext,
-    ScanSession, ScannerFactory, ScannerRegistry, SessionHandle, SessionProgress, SessionStatus,
-    Severity, SingleUserAgent, Status, Target, UserAgentSource,
+    BaseScanner, Credential, Finding, FindingBuilder, FindingId, Identity, Method, Orchestrator,
+    ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanSession,
+    ScannerFactory, ScannerRegistry, SessionHandle, SessionProgress, SessionStatus, Severity,
+    SingleUserAgent, Status, Target, UserAgentSource, run_differential,
 };
 pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};
 pub use tokio_util::sync::CancellationToken;

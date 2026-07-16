@@ -6,8 +6,8 @@
 //! zero-length lifetime rather than sleeping.
 
 use abyssum_core::{
-    visible_session, visible_sessions, AuthConfig, AuthManager, DatabaseManager, Error, Role,
-    ScanSession, SessionStatus, Target,
+    AuthConfig, AuthManager, DatabaseManager, Error, Role, ScanSession, SessionStatus, Target,
+    visible_session, visible_sessions,
 };
 
 /// Open a fresh store plus an [`AuthManager`] over its pool with default

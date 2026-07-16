@@ -36,10 +36,10 @@ pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get("cookie")?.to_str().ok()?;
     for pair in raw.split(';') {
         let pair = pair.trim();
-        if let Some((k, v)) = pair.split_once('=') {
-            if k.trim() == name {
-                return Some(v.trim().to_string());
-            }
+        if let Some((k, v)) = pair.split_once('=')
+            && k.trim() == name
+        {
+            return Some(v.trim().to_string());
         }
     }
     None
@@ -155,10 +155,10 @@ impl LoginLimiter {
 /// An HTML response, optionally attaching a freshly-minted CSRF `Set-Cookie`.
 pub fn html(body: String, set_cookie: Option<String>) -> Response {
     let mut resp = Html(body).into_response();
-    if let Some(set) = set_cookie {
-        if let Ok(value) = set.parse() {
-            resp.headers_mut().append(SET_COOKIE, value);
-        }
+    if let Some(set) = set_cookie
+        && let Ok(value) = set.parse()
+    {
+        resp.headers_mut().append(SET_COOKIE, value);
     }
     resp
 }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use abyssum_core::{analyze_finding, AiConfig, Finding, Severity, Status, Target};
+use abyssum_core::{AiConfig, Finding, Severity, Status, Target, analyze_finding};
 
 // --- Mock OpenAI-compatible server ------------------------------------------
 
@@ -323,10 +323,11 @@ async fn malformed_body_surfaces_clear_error() {
     let err = analyze_finding(&config_for(&mock.base), &sample_finding())
         .await
         .unwrap_err();
-    assert!(err
-        .to_string()
-        .to_lowercase()
-        .contains("could not be interpreted"));
+    assert!(
+        err.to_string()
+            .to_lowercase()
+            .contains("could not be interpreted")
+    );
 }
 
 /// 6.5: an empty `choices` array is a malformed response, not analysis text.

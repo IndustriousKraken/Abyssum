@@ -10,14 +10,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use abyssum_core::{
-    execute_custom_request, normalize_url, visible_session, visible_sessions, CustomRequestSpec,
-    Finding, FindingFilter, FindingId, ProgressCallback, ProgressUpdate, ScanSession,
-    SessionHandle, Severity, Status, TagApply, Target, User,
+    CustomRequestSpec, Finding, FindingFilter, FindingId, ProgressCallback, ProgressUpdate,
+    ScanSession, SessionHandle, Severity, Status, TagApply, Target, User, execute_custom_request,
+    normalize_url, visible_session, visible_sessions,
 };
+use axum::Extension;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::Extension;
 use serde::Deserialize;
 use tokio::net::lookup_host;
 use url::Host;
@@ -995,12 +995,13 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -1097,7 +1098,7 @@ mod tests {
         assert!(blk("fc00::1"));
         assert!(blk("fe80::1"));
         assert!(blk("::ffff:127.0.0.1")); // IPv4-mapped loopback
-                                          // Public addresses are allowed through.
+        // Public addresses are allowed through.
         assert!(!blk("8.8.8.8"));
         assert!(!blk("1.1.1.1"));
         assert!(!blk("2606:4700:4700::1111"));

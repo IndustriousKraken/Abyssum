@@ -37,20 +37,20 @@ mod output;
 mod response;
 mod spec;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use url::Url;
 
 use crate::rate_limiter::{Pace, RateLimiter};
 
-pub use analysis::{analyze, Signal, SignalKind};
+pub use analysis::{Signal, SignalKind, analyze};
 pub use output::OutputFormat;
 pub use response::{CaptureResult, CapturedResponse, RequestOutcome};
 pub use spec::{
-    normalize_url, CustomRequestSpec, PreparedRequest, DEFAULT_BODY_PREVIEW_CAP,
-    DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
+    CustomRequestSpec, DEFAULT_BODY_PREVIEW_CAP, DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT,
+    PreparedRequest, normalize_url,
 };
 
 use spec::MAX_REDIRECTS;
@@ -79,11 +79,11 @@ pub async fn execute(spec: &CustomRequestSpec, limiter: &RateLimiter) -> Request
     };
 
     // Pace through the shared limiter before any bytes leave (first request free).
-    if let Some(host) = url.host_str() {
-        if matches!(limiter.acquire(host).await, Pace::Halt) {
-            let msg = format!("pacing halted the request to {host}: sustained target distress");
-            return RequestOutcome::failed(prepared, msg, cap);
-        }
+    if let Some(host) = url.host_str()
+        && matches!(limiter.acquire(host).await, Pace::Halt)
+    {
+        let msg = format!("pacing halted the request to {host}: sustained target distress");
+        return RequestOutcome::failed(prepared, msg, cap);
     }
 
     let redirects = Arc::new(AtomicUsize::new(0));

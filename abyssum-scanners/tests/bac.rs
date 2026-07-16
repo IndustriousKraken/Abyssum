@@ -24,7 +24,7 @@ use abyssum_core::{
     BaseScanner, Config, Credential, DatabaseManager, Orchestrator, RateLimiter, ScanContext,
     ScannerRegistry, SessionStatus, Severity, SingleUserAgent, Status, Target,
 };
-use abyssum_scanners::{register_builtins, BacScanner};
+use abyssum_scanners::{BacScanner, register_builtins};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -148,10 +148,10 @@ async fn handle_conn(
     };
 
     // Fire cancellation before responding, so the in-flight scan sees it next.
-    if let Some((n, token)) = &cancel_after {
-        if count >= *n {
-            token.cancel();
-        }
+    if let Some((n, token)) = &cancel_after
+        && count >= *n
+    {
+        token.cancel();
     }
 
     let route = routes.get(&path).cloned().unwrap_or(default);
@@ -213,10 +213,10 @@ fn header_in(head: &str, name: &str) -> Option<String> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case(name) {
-                return Some(value.trim().to_string());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case(name)
+        {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -322,12 +322,16 @@ async fn flags_exposed_and_reachable_redirect_target_only() {
     );
 
     // Neither the protected (401) nor the absent (404) endpoint is reported.
-    assert!(findings
-        .iter()
-        .all(|f| f.evidence.as_ref().unwrap()["endpoint"] != "/api/users"));
-    assert!(findings
-        .iter()
-        .all(|f| f.evidence.as_ref().unwrap()["endpoint"] != "/manage"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.evidence.as_ref().unwrap()["endpoint"] != "/api/users")
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.evidence.as_ref().unwrap()["endpoint"] != "/manage")
+    );
 }
 
 /// Spec "Redirect target requires authentication": a sensitive path that redirects

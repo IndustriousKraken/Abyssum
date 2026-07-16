@@ -22,7 +22,7 @@ use abyssum_core::{
     BaseScanner, Config, DatabaseManager, Orchestrator, RateLimiter, ScanContext, ScannerRegistry,
     SessionStatus, SingleUserAgent, Status, Target,
 };
-use abyssum_scanners::{register_builtins, RestDiscoveryScanner};
+use abyssum_scanners::{RestDiscoveryScanner, register_builtins};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -124,10 +124,10 @@ async fn handle_conn(
     };
 
     // Fire cancellation before responding, so the in-flight scan sees it next.
-    if let Some((n, token)) = &cancel_after {
-        if count >= *n {
-            token.cancel();
-        }
+    if let Some((n, token)) = &cancel_after
+        && count >= *n
+    {
+        token.cancel();
     }
 
     let route = routes.get(&path).cloned().unwrap_or(default);
@@ -467,9 +467,11 @@ async fn registered_scanner_loads_seeded_wordlist_and_runs_via_orchestrator() {
     let mut registry = ScannerRegistry::new(config.clone());
     register_builtins(&mut registry, &store);
     assert!(registry.contains(RestDiscoveryScanner::ID));
-    assert!(registry
-        .available()
-        .contains(&RestDiscoveryScanner::ID.to_string()));
+    assert!(
+        registry
+            .available()
+            .contains(&RestDiscoveryScanner::ID.to_string())
+    );
 
     let orchestrator = Orchestrator::new(config, registry);
     let session = orchestrator

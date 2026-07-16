@@ -549,10 +549,10 @@ impl IdorScanner {
 
         // Path templates: the configured built-ins plus the target's own template.
         let mut templates: Vec<String> = self.config.path_templates.clone();
-        if let Some(template) = target.id_template() {
-            if !templates.iter().any(|t| t == template) {
-                templates.push(template.to_string());
-            }
+        if let Some(template) = target.id_template()
+            && !templates.iter().any(|t| t == template)
+        {
+            templates.push(template.to_string());
         }
         for template in &templates {
             for (shape, baseline_ref) in refs.shapes() {
@@ -1647,15 +1647,19 @@ mod tests {
         assert_eq!(evidence["status"], 200);
         assert_eq!(evidence["id_shape"], "numeric");
         assert_eq!(evidence["data_class"], "credentials");
-        assert!(evidence["sensitive_fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f == "password"));
-        assert!(evidence["response_sample"]
-            .as_str()
-            .unwrap()
-            .contains("bob"));
+        assert!(
+            evidence["sensitive_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "password")
+        );
+        assert!(
+            evidence["response_sample"]
+                .as_str()
+                .unwrap()
+                .contains("bob")
+        );
     }
 
     #[test]

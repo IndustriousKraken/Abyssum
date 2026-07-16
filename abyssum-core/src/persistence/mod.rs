@@ -42,7 +42,7 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::error::{db_err, Error, Result};
+use crate::error::{Error, Result, db_err};
 use crate::scan::{Finding, FindingId, ScanSession, SessionStatus, Severity, Status, Target};
 
 /// Migrations embedded at compile time from `abyssum-core/migrations/`. Applied
@@ -91,10 +91,10 @@ impl DatabaseManager {
         // Use the async filesystem API so this `async fn` never issues a blocking
         // syscall on the executor — `connect` is a startup path today, but keeping
         // it await-friendly means it stays safe to call from any async context.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let options = SqliteConnectOptions::new()
@@ -766,7 +766,7 @@ fn parse_session_status(text: &str) -> Result<SessionStatus> {
         other => {
             return Err(Error::Database(format!(
                 "unknown session status in store: {other:?}"
-            )))
+            )));
         }
     })
 }
@@ -789,7 +789,7 @@ fn parse_status(text: &str) -> Result<Status> {
         other => {
             return Err(Error::Database(format!(
                 "unknown finding status in store: {other:?}"
-            )))
+            )));
         }
     })
 }
@@ -816,7 +816,7 @@ fn parse_severity(text: &str) -> Result<Severity> {
         other => {
             return Err(Error::Database(format!(
                 "unknown severity in store: {other:?}"
-            )))
+            )));
         }
     })
 }

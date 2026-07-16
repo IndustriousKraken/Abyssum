@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use abyssum_core::custom_request::{execute, OutputFormat};
+use abyssum_core::custom_request::{OutputFormat, execute};
 use abyssum_core::{CaptureResult, CustomRequestSpec, RateLimiter};
 
 // --- Mock HTTP server -------------------------------------------------------
@@ -285,9 +285,11 @@ async fn oversized_body_is_capped_and_marked_truncated() {
     assert_eq!(doc["response"]["body_capped"], true);
 
     // And noted in the human form.
-    assert!(outcome
-        .render(OutputFormat::Human)
-        .contains("exceeded the capture limit"));
+    assert!(
+        outcome
+            .render(OutputFormat::Human)
+            .contains("exceeded the capture limit")
+    );
 }
 
 /// Task 5.6: a transport error (no listener on the port) yields an error-carrying
@@ -308,9 +310,11 @@ async fn transport_error_is_captured_not_fatal() {
         "a refused connection should be captured as an error"
     );
     // The error renders in both forms without panicking.
-    assert!(outcome
-        .render(OutputFormat::Human)
-        .contains("=== Error ==="));
+    assert!(
+        outcome
+            .render(OutputFormat::Human)
+            .contains("=== Error ===")
+    );
     let doc: serde_json::Value = serde_json::from_str(&outcome.render(OutputFormat::Json)).unwrap();
     assert!(doc["error"].is_string());
 }

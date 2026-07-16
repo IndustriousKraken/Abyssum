@@ -113,10 +113,10 @@ async fn handle_conn(
     };
 
     // Fire cancellation before responding, so the in-flight scan sees it next.
-    if let Some((n, token)) = &cancel_after {
-        if count >= *n {
-            token.cancel();
-        }
+    if let Some((n, token)) = &cancel_after
+        && count >= *n
+    {
+        token.cancel();
     }
 
     // Build the configured CORS headers.
@@ -182,10 +182,10 @@ fn header_in(request: &str, name: &str) -> Option<String> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case(name) {
-                return Some(value.trim().to_string());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case(name)
+        {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -252,10 +252,12 @@ async fn reflects_origin_with_credentials_reports_high_severity_findings() {
         acao, evidence["origin_sent"],
         "ACAO reflects exactly the origin we sent"
     );
-    assert!(evidence["probed_url"]
-        .as_str()
-        .unwrap()
-        .starts_with("http://127.0.0.1"));
+    assert!(
+        evidence["probed_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1")
+    );
 
     // The null probe is classified as a null-origin acceptance, not a reflection.
     let null = findings
@@ -292,9 +294,11 @@ async fn reflects_origin_without_credentials_reports_medium_severity() {
         findings.iter().all(|f| f.severity == Severity::Medium),
         "uncredentialed reflections are Medium: {findings:#?}"
     );
-    assert!(findings
-        .iter()
-        .all(|f| f.evidence.as_ref().unwrap()["credentials_allowed"] == false));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.evidence.as_ref().unwrap()["credentials_allowed"] == false)
+    );
 }
 
 /// Spec "Wildcard combined with credentials": `ACAO: *` + `ACAC: true` is a High
@@ -335,9 +339,11 @@ async fn bare_wildcard_is_low() {
 
     assert_eq!(findings.len(), 5);
     assert!(findings.iter().all(|f| f.severity == Severity::Low));
-    assert!(findings
-        .iter()
-        .all(|f| f.evidence.as_ref().unwrap()["misconfiguration"] == "bare_wildcard"));
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.evidence.as_ref().unwrap()["misconfiguration"] == "bare_wildcard")
+    );
 }
 
 /// Task 5.3 + spec "Properly restricted origin is not a finding": a server that

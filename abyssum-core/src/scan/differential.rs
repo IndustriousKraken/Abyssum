@@ -37,7 +37,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::seed::RotatingUserAgent;
 
 use super::context::{
-    build_engine_http_client, Credential, RequestSpec, ScanContext, UserAgentSource,
+    Credential, RequestSpec, ScanContext, UserAgentSource, build_engine_http_client,
 };
 use super::finding::{Finding, Severity, Status};
 use super::orchestrator::Orchestrator;
@@ -574,12 +574,14 @@ mod tests {
             view("anonymous", 200, admin),
         ];
         let finding = compare(&target(), &url(), &views).expect("anonymous vertical access");
-        assert!(finding
-            .evidence
-            .as_ref()
-            .unwrap()
-            .to_string()
-            .contains("anonymous"));
+        assert!(
+            finding
+                .evidence
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("anonymous")
+        );
     }
 
     /// Two identities served the same *login / denied* page are not mistaken for
