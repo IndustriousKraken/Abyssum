@@ -42,6 +42,7 @@ use super::context::{
 use super::finding::{Finding, Severity, Status};
 use super::orchestrator::Orchestrator;
 use super::registry::ScannerRegistry;
+use super::session::ScanSession;
 use super::target::Target;
 
 /// The stable scanner-id label carried by every differential finding. Findings are
@@ -105,12 +106,18 @@ impl Identity {
 /// owns scanner registration (the core crate cannot reach the scanner crate), so it
 /// passes a closure. Every per-identity orchestrator shares one rate limiter and
 /// User-Agent source, so the pacing floor spans all identities.
+///
+/// `cancel` is the run's cancellation signal: when it fires (e.g. the CLI catches
+/// Ctrl-C), each in-flight per-identity pass is cancelled and the re-probe loop
+/// stops promptly, returning the findings gathered so far so a caller can still
+/// persist the partial result.
 pub async fn run_differential(
     config: Arc<Config>,
     make_registry: impl Fn() -> ScannerRegistry,
     targets: &[Target],
     scanner_ids: &[String],
     identities: &[Identity],
+    cancel: CancellationToken,
 ) -> Result<Vec<Finding>> {
     // One shared pacing authority + UA source, so every identity's pass and the
     // differential re-probe route through the same per-host floor.
@@ -127,6 +134,9 @@ pub async fn run_differential(
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for identity in identities {
+        if cancel.is_cancelled() {
+            break;
+        }
         let mut orchestrator = Orchestrator::new(config.clone(), make_registry())
             .with_rate_limiter(rate_limiter.clone())
             .with_http_client(http.clone())
@@ -134,9 +144,7 @@ pub async fn run_differential(
         if let Some(credential) = &identity.credential {
             orchestrator = orchestrator.with_credential(credential.clone());
         }
-        let session = orchestrator
-            .run_session(targets.to_vec(), scanner_ids.to_vec(), None)
-            .await?;
+        let session = run_identity_pass(&orchestrator, targets, scanner_ids, &cancel).await?;
         for candidate in extract_candidates(&session.findings) {
             if seen.insert(candidate.url.as_str().to_string()) {
                 candidates.push(candidate);
@@ -145,9 +153,11 @@ pub async fn run_differential(
     }
 
     // Phase 2: re-probe each candidate once per identity and compare.
-    let cancel = CancellationToken::new();
     let mut findings = Vec::new();
     for candidate in &candidates {
+        if cancel.is_cancelled() {
+            break;
+        }
         if let Some(finding) = diff_one_resource(
             &candidate.target,
             &candidate.url,
@@ -165,6 +175,35 @@ pub async fn run_differential(
     }
 
     Ok(findings)
+}
+
+/// Run one per-identity scanner pass to a terminal state, cancelling it promptly if
+/// `cancel` fires. The orchestrator owns its own session token, so bridge the
+/// external run token to it via [`Orchestrator::cancel`] — the same shape as the
+/// CLI's `run_to_completion`, which the ordinary scan path uses to honor Ctrl-C.
+async fn run_identity_pass(
+    orchestrator: &Orchestrator,
+    targets: &[Target],
+    scanner_ids: &[String],
+    cancel: &CancellationToken,
+) -> Result<ScanSession> {
+    let handle = orchestrator.create_session(targets.to_vec(), scanner_ids.to_vec())?;
+    let session_id = handle.lock().expect("session handle not poisoned").id;
+    let run = orchestrator.run(session_id, None);
+    tokio::pin!(run);
+    let mut signalled = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut run => return result,
+            // Fire once: cancel the running session, then keep awaiting the run,
+            // which returns its (Cancelled) partial session promptly.
+            _ = cancel.cancelled(), if !signalled => {
+                signalled = true;
+                let _ = orchestrator.cancel(session_id);
+            }
+        }
+    }
 }
 
 /// A resource surfaced by a per-identity pass: the scan target it belongs to and
@@ -233,15 +272,22 @@ async fn diff_one_resource(
         if let Some(credential) = &identity.credential {
             ctx = ctx.with_credential(credential.clone());
         }
-        // A transport failure for one identity drops only that identity's view; the
-        // others still compare.
-        if let Ok(probe) = probe(&ctx, url.clone()).await {
-            views.push(ResourceView {
-                identity: identity.label.clone(),
-                status: probe.status,
-                body: probe.body,
-                truncated: probe.truncated,
-            });
+        // Race the probe against cancellation so an in-flight request unwinds
+        // promptly on Ctrl-C; a transport failure for one identity drops only that
+        // identity's view, and the others still compare.
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            result = probe(&ctx, url.clone()) => {
+                if let Ok(probe) = result {
+                    views.push(ResourceView {
+                        identity: identity.label.clone(),
+                        status: probe.status,
+                        body: probe.body,
+                        truncated: probe.truncated,
+                    });
+                }
+            }
         }
     }
     compare(target, url, &views)
@@ -592,6 +638,33 @@ mod tests {
             normalized_body_hash(b"hello world")
         );
         assert_ne!(normalized_body_hash(b"alice"), normalized_body_hash(b"bob"));
+    }
+
+    /// A run whose cancellation token is already fired short-circuits: phase 1
+    /// breaks before any pass runs and the call returns `Ok` with the (empty)
+    /// partial findings rather than hanging or erroring — the property the CLI's
+    /// Ctrl-C race relies on to persist a partial differential result.
+    #[tokio::test]
+    async fn cancelled_run_returns_partial_findings() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let targets = [Target::parse("https://example.com").unwrap()];
+        let scanner_ids = ["rest_discovery".to_string()];
+        let identities = [Identity::anonymous("a"), Identity::anonymous("b")];
+        let findings = run_differential(
+            Arc::new(Config::default()),
+            || ScannerRegistry::new(Arc::new(Config::default())),
+            &targets,
+            &scanner_ids,
+            &identities,
+            cancel,
+        )
+        .await
+        .expect("a cancelled run still returns Ok with the partial findings");
+        assert!(
+            findings.is_empty(),
+            "a pre-cancelled run probes nothing, so it finds nothing"
+        );
     }
 }
 

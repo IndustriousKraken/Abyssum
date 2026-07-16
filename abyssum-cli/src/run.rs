@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use abyssum_core::{
-    logging, Config, Credential, DatabaseManager, Identity, Orchestrator, ProgressCallback,
-    ProgressKind, ProgressUpdate, ReferenceStore, ScanSession, ScannerRegistry, SessionStatus,
-    Target,
+    logging, CancellationToken, Config, Credential, DatabaseManager, Identity, Orchestrator,
+    ProgressCallback, ProgressKind, ProgressUpdate, ReferenceStore, ScanSession, ScannerRegistry,
+    SessionStatus, Target,
 };
 use abyssum_scanners::register_builtins;
 use uuid::Uuid;
@@ -245,24 +245,51 @@ async fn execute_differential(
     output: crate::cli::OutputFormat,
 ) -> Result<RunOutcome, CliError> {
     let store = db.reference_store();
+    // A cancellation token wired into the differential run, fired on Ctrl-C so a
+    // SIGINT stops the scan promptly and the partial findings gathered so far are
+    // still persisted — the same contract as the ordinary path's run_to_completion.
+    let cancel = CancellationToken::new();
     let findings = {
         let make_registry = || build_registry(&config, &store);
-        abyssum_core::run_differential(
+        let run = abyssum_core::run_differential(
             config.clone(),
             make_registry,
             &targets,
             &scanner_ids,
             &identities,
-        )
-        .await
-        .map_err(|e| CliError::ScanFailure(format!("differential scan failed: {e}")))?
+            cancel.clone(),
+        );
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                // Bias toward completion so a run that finishes as the signal
+                // arrives is reported as completed, not interrupted.
+                biased;
+                result = &mut run => {
+                    break result
+                        .map_err(|e| CliError::ScanFailure(format!("differential scan failed: {e}")))?;
+                }
+                signal = tokio::signal::ctrl_c() => {
+                    if signal.is_ok() {
+                        cancel.cancel();
+                    }
+                    // Keep awaiting the run; it returns its partial findings promptly.
+                }
+            }
+        }
     };
+    let interrupted = cancel.is_cancelled();
 
     // Persist and render the differential findings under one session, identically
     // to an ordinary scan (the session row first, so each finding's foreign key
-    // resolves).
+    // resolves). A run interrupted by Ctrl-C is marked Cancelled, matching the
+    // ordinary path, but its partial findings are persisted all the same.
     let mut session = ScanSession::new(targets, scanner_ids);
-    session.status = SessionStatus::Completed;
+    session.status = if interrupted {
+        SessionStatus::Cancelled
+    } else {
+        SessionStatus::Completed
+    };
     session.completed_units = session.total_units;
     session.findings = findings;
     // Stamp the session from a finding's timestamp (the CLI has no direct clock
@@ -285,7 +312,11 @@ async fn execute_differential(
     Ok(RunOutcome {
         session,
         rendered,
-        exit_code: EXIT_SUCCESS,
+        exit_code: if interrupted {
+            EXIT_INTERRUPTED
+        } else {
+            EXIT_SUCCESS
+        },
     })
 }
 

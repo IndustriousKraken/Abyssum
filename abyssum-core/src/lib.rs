@@ -50,3 +50,4 @@ pub use scan::{
     Severity, SingleUserAgent, Status, Target, UserAgentSource,
 };
 pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};
+pub use tokio_util::sync::CancellationToken;
