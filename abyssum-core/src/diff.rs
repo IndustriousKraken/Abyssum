@@ -303,19 +303,9 @@ fn csv_row(
     to: &str,
 ) {
     let fields = [change, scanner, target, title, from, to];
-    let escaped: Vec<String> = fields.iter().map(|f| csv_escape(f)).collect();
+    let escaped: Vec<String> = fields.iter().map(|f| crate::csv::escape(f)).collect();
     out.push_str(&escaped.join(","));
     out.push('\n');
-}
-
-/// Escape a CSV field per RFC 4180 (quote when it contains a comma, quote, or line
-/// break; otherwise verbatim).
-fn csv_escape(field: &str) -> String {
-    if field.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", field.replace('"', "\"\""))
-    } else {
-        field.to_string()
-    }
 }
 
 /// Collapse any run of whitespace (including newlines) into single spaces so a

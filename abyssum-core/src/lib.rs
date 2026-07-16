@@ -19,6 +19,7 @@ pub mod ai;
 pub mod annotations;
 pub mod auth;
 pub mod config;
+pub(crate) mod csv;
 pub mod custom_request;
 pub mod diff;
 pub mod error;

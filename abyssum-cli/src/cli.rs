@@ -324,6 +324,46 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
+    /// The `diff` subcommand parses the older/newer session ids and its output
+    /// format, and does not require the scan flags.
+    #[test]
+    fn parses_diff_subcommand() {
+        let cli = Cli::try_parse_from([
+            "abyssum",
+            "diff",
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Diff(args)) => {
+                assert_eq!(args.older, "11111111-1111-1111-1111-111111111111");
+                assert_eq!(args.newer, "22222222-2222-2222-2222-222222222222");
+                assert_eq!(args.output, OutputFormat::Json);
+            }
+            other => panic!("expected a diff command, got {other:?}"),
+        }
+    }
+
+    /// `diff` defaults `--output` to the table.
+    #[test]
+    fn diff_defaults_output_to_table() {
+        let cli = Cli::try_parse_from(["abyssum", "diff", "id-a", "id-b"]).unwrap();
+        let Some(Command::Diff(args)) = cli.command else {
+            panic!("expected a diff command");
+        };
+        assert_eq!(args.output, OutputFormat::Table);
+    }
+
+    /// `diff` requires both the older and newer session ids.
+    #[test]
+    fn diff_requires_both_sessions() {
+        let err = Cli::try_parse_from(["abyssum", "diff", "only-one"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
     /// `--identity` is repeatable and captures each raw spec verbatim (parsing of
     /// the `label:cookie=…:bearer=…` form happens in the run layer).
     #[test]

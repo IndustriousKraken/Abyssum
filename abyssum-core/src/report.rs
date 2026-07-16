@@ -179,7 +179,7 @@ fn reportable_ranked(session: &ScanSession) -> Vec<RankedFinding<'_>> {
 
 /// Collapse duplicate findings and order the result by importance for reporting.
 ///
-/// Findings sharing a [`finding_key`] — the same scanner, normalized endpoint, and
+/// Findings sharing a [`Finding::consolidation_key`] — the same scanner, normalized endpoint, and
 /// title — collapse into one entry carrying the count of how many were observed;
 /// findings differing in any of those stay separate. The consolidated entries are
 /// then ordered by importance — vulnerable status before safe/info, then by
@@ -571,22 +571,12 @@ fn render_csv(sessions: &[ScanSession]) -> String {
                 finding.target.full_url().to_string(),
                 finding.description.clone().unwrap_or_default(),
             ];
-            let escaped: Vec<String> = row.iter().map(|c| csv_escape(c)).collect();
+            let escaped: Vec<String> = row.iter().map(|c| crate::csv::escape(c)).collect();
             out.push_str(&escaped.join(","));
             out.push('\n');
         }
     }
     out
-}
-
-/// Escape a CSV field per RFC 4180: wrap in double quotes (doubling any interior
-/// quote) when it contains a comma, quote, or line break; otherwise emit verbatim.
-fn csv_escape(field: &str) -> String {
-    if field.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", field.replace('"', "\"\""))
-    } else {
-        field.to_string()
-    }
 }
 
 // --- HackerOne ------------------------------------------------------------
@@ -653,12 +643,18 @@ fn render_hackerone(session: &ScanSession, options: ReportOptions) -> Result<Str
         out.push_str("## Additional Findings\n\n");
         for ranked in rest {
             let finding = ranked.finding;
+            let occurrences = if ranked.occurrences > 1 {
+                format!(" (observed {} times)", ranked.occurrences)
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "- **{}** (`{}`, {}) — {}\n",
+                "- **{}** (`{}`, {}) — {}{}\n",
                 finding.title,
                 finding.scanner_id,
                 severity_label(finding.severity),
-                finding.target.full_url()
+                finding.target.full_url(),
+                occurrences
             ));
         }
         out.push('\n');
