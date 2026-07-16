@@ -333,10 +333,15 @@ fn compare(target: &Target, url: &Url, views: &[ResourceView]) -> Option<Finding
             .insert(view.identity.clone());
     }
 
+    // Pick the largest shared group. HashMap iteration order is randomized and
+    // `max_by_key` returns the *last* maximum, so ties would make the reported
+    // finding non-deterministic across runs; break them by the identity set (each
+    // identity lands in exactly one group, so the sets are disjoint and this is a
+    // total order) to keep the evidence reproducible.
     let (hash, shared) = groups
         .iter()
         .filter(|(_, identities)| identities.len() >= 2)
-        .max_by_key(|(_, identities)| identities.len())?;
+        .max_by(|(_, a), (_, b)| a.len().cmp(&b.len()).then_with(|| b.cmp(a)))?;
 
     // A representative privileged view from the shared group carries the sample and
     // status for the evidence.
@@ -594,6 +599,35 @@ mod tests {
             view("bob", 200, "{\"id\":1,\n\t\"owner\":\"alice\"}"),
         ];
         assert!(compare(&target(), &url(), &views).is_some());
+    }
+
+    /// When two shared-content groups tie on size, the reported finding is
+    /// deterministic across runs (HashMap iteration order is randomized, so a fresh
+    /// `compare` runs against a fresh map each iteration). The tie is broken by the
+    /// identity set, so the lexicographically-smaller group ({alice, bob}) always
+    /// wins over the equal-sized {carol, dave}.
+    #[test]
+    fn tied_shared_groups_pick_deterministically() {
+        let ab = r#"{"shared":"one"}"#;
+        let cd = r#"{"shared":"two"}"#;
+        let views = [
+            view("alice", 200, ab),
+            view("bob", 200, ab),
+            view("carol", 200, cd),
+            view("dave", 200, cd),
+        ];
+        for _ in 0..50 {
+            let finding = compare(&target(), &url(), &views).expect("a shared group is a finding");
+            let ids = finding.evidence.as_ref().unwrap()["identities"].to_string();
+            assert!(
+                ids.contains("alice") && ids.contains("bob"),
+                "the smaller tied group must win every run; got {ids}"
+            );
+            assert!(
+                !ids.contains("carol"),
+                "the losing group must not appear: {ids}"
+            );
+        }
     }
 
     /// A single privileged identity (the others denied/absent) is not a finding.

@@ -53,7 +53,9 @@ pub struct Cli {
     /// **two or more** to trigger an auth-differential run: the selected scanners
     /// run once per identity and access-control divergence is reported. A single
     /// identity is an ordinary scan carrying that identity's credential. Cookie and
-    /// bearer values must not contain a colon.
+    /// bearer values must not contain a colon. A differential run reports only
+    /// access-control divergence between identities — not the underlying scanners'
+    /// own findings (discovered endpoints, CORS misconfigurations, etc.).
     #[arg(long = "identity", value_name = "SPEC", action = clap::ArgAction::Append)]
     pub identities: Vec<String>,
 
@@ -66,7 +68,9 @@ pub struct Cli {
 
     /// Bearer token sent as `Authorization: Bearer <token>` on every credentialed
     /// request. Optional and independent of `--cookie`: supply either, both, or
-    /// neither.
+    /// neither. Note: a secret passed here (like `--cookie`) is visible to other
+    /// local users via the process table and is retained in shell history — avoid
+    /// it on shared hosts.
     #[arg(long, value_name = "TOKEN")]
     pub bearer: Option<String>,
 
