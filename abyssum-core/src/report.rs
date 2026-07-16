@@ -28,6 +28,9 @@
 //! that produced it (`cors`, `idor`, …). Where a format names both a "scanner id"
 //! and a "finding type" column they carry that same value.
 
+use std::cmp::Reverse;
+use std::collections::hash_map::{Entry, HashMap};
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -154,21 +157,80 @@ impl ReportGenerator {
     }
 }
 
-// --- Shared selection / ordering helpers ----------------------------------
+// --- Shared consolidation / ordering helpers ------------------------------
 
-/// The reportable findings of `session`, ordered most-severe-first.
+/// A reported finding after consolidation: a representative [`Finding`] plus the
+/// number of equivalent findings that were observed (its occurrence count).
+struct RankedFinding<'a> {
+    /// The first-seen finding standing in for the collapsed group.
+    finding: &'a Finding,
+    /// How many findings shared this one's key (always ≥ 1).
+    occurrences: usize,
+}
+
+/// The reportable findings of `session`, consolidated and ranked for reporting.
 ///
-/// Filtering keeps only [`Status::Vulnerable`] findings; the stable sort keeps the
-/// stored order (timestamp, then id) for equal severities, so ties break
-/// deterministically and the output is reproducible.
-fn reportable_most_severe_first(session: &ScanSession) -> Vec<&Finding> {
-    let mut findings: Vec<&Finding> = session
-        .findings
-        .iter()
-        .filter(|f| f.status.is_reportable())
-        .collect();
-    findings.sort_by_key(|f| std::cmp::Reverse(severity_rank(f.severity)));
-    findings
+/// Keeps only [`Status::Vulnerable`] findings (see the "Only Reportable Findings"
+/// requirement), then collapses duplicates and orders by importance via
+/// [`consolidate_and_rank`].
+fn reportable_ranked(session: &ScanSession) -> Vec<RankedFinding<'_>> {
+    consolidate_and_rank(session.findings.iter().filter(|f| f.status.is_reportable()))
+}
+
+/// Collapse duplicate findings and order the result by importance for reporting.
+///
+/// Findings sharing a [`finding_key`] — the same scanner, normalized endpoint, and
+/// title — collapse into one entry carrying the count of how many were observed;
+/// findings differing in any of those stay separate. The consolidated entries are
+/// then ordered by importance — vulnerable status before safe/info, then by
+/// descending severity — with a stable tie-break: equal-rank entries keep their
+/// first-seen order, so the same input always yields the same output.
+fn consolidate_and_rank<'a>(
+    findings: impl IntoIterator<Item = &'a Finding>,
+) -> Vec<RankedFinding<'a>> {
+    let mut ranked: Vec<RankedFinding<'a>> = Vec::new();
+    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    for finding in findings {
+        match seen.entry(finding_key(finding)) {
+            Entry::Occupied(e) => ranked[*e.get()].occurrences += 1,
+            Entry::Vacant(e) => {
+                e.insert(ranked.len());
+                ranked.push(RankedFinding {
+                    finding,
+                    occurrences: 1,
+                });
+            }
+        }
+    }
+    // Stable sort keyed on importance; equal-rank entries keep insertion order.
+    ranked.sort_by_key(|r| {
+        (
+            Reverse(status_rank(r.finding.status)),
+            Reverse(severity_rank(r.finding.severity)),
+        )
+    });
+    ranked
+}
+
+/// The stable key identifying "the same issue": the producing scanner, the
+/// normalized target endpoint (the URL's canonical string form), and the finding's
+/// title (its class).
+fn finding_key(finding: &Finding) -> (String, String, String) {
+    (
+        finding.scanner_id.clone(),
+        finding.target.full_url().to_string(),
+        finding.title.clone(),
+    )
+}
+
+/// Rank a status for importance ordering: vulnerable (2) above safe (1) above
+/// informational (0), so vulnerable findings sort ahead of the rest.
+fn status_rank(status: Status) -> u8 {
+    match status {
+        Status::Vulnerable => 2,
+        Status::Safe => 1,
+        Status::Info => 0,
+    }
 }
 
 /// Rank a severity for most-severe-first ordering: critical (4) highest, info (0)
@@ -186,7 +248,7 @@ fn severity_rank(severity: Severity) -> u8 {
 
 /// The per-severity counts of `findings`, listed critical-first (every level
 /// present, zero when none) for the executive-summary breakdown.
-fn severity_breakdown(findings: &[&Finding]) -> Vec<(Severity, usize)> {
+fn severity_breakdown(findings: &[RankedFinding]) -> Vec<(Severity, usize)> {
     [
         Severity::Critical,
         Severity::High,
@@ -195,7 +257,15 @@ fn severity_breakdown(findings: &[&Finding]) -> Vec<(Severity, usize)> {
         Severity::Info,
     ]
     .into_iter()
-    .map(|sev| (sev, findings.iter().filter(|f| f.severity == sev).count()))
+    .map(|sev| {
+        (
+            sev,
+            findings
+                .iter()
+                .filter(|r| r.finding.severity == sev)
+                .count(),
+        )
+    })
     .collect()
 }
 
@@ -335,7 +405,7 @@ fn impact_for(scanner_id: &str) -> &'static str {
 
 /// Render a single session as a self-contained Markdown submission report.
 fn render_markdown(session: &ScanSession, options: ReportOptions) -> String {
-    let findings = reportable_most_severe_first(session);
+    let findings = reportable_ranked(session);
     let mut out = String::new();
 
     out.push_str("# Abyssum Scan Report\n\n");
@@ -363,7 +433,8 @@ fn render_markdown(session: &ScanSession, options: ReportOptions) -> String {
     if findings.is_empty() {
         out.push_str("_No reportable findings._\n");
     }
-    for (i, finding) in findings.iter().enumerate() {
+    for (i, ranked) in findings.iter().enumerate() {
+        let finding = ranked.finding;
         out.push_str(&format!(
             "### {}. {} — {}\n\n",
             i + 1,
@@ -375,10 +446,11 @@ fn render_markdown(session: &ScanSession, options: ReportOptions) -> String {
             "- **Severity:** {}\n",
             severity_label(finding.severity)
         ));
-        out.push_str(&format!(
-            "- **Endpoint:** {}\n\n",
-            finding.target.full_url()
-        ));
+        out.push_str(&format!("- **Endpoint:** {}\n", finding.target.full_url()));
+        if ranked.occurrences > 1 {
+            out.push_str(&format!("- **Occurrences:** {}\n", ranked.occurrences));
+        }
+        out.push('\n');
         if let Some(description) = &finding.description {
             out.push_str(description);
             out.push_str("\n\n");
@@ -419,7 +491,8 @@ struct JsonSession {
     findings: Vec<JsonFinding>,
 }
 
-/// One reportable finding in the JSON export. `type` is the producing scanner id.
+/// One reportable finding in the JSON export. `type` is the producing scanner id;
+/// `occurrences` is how many equivalent findings collapsed into this one.
 #[derive(Serialize)]
 struct JsonFinding {
     #[serde(rename = "type")]
@@ -428,6 +501,7 @@ struct JsonFinding {
     target: String,
     status: Status,
     title: String,
+    occurrences: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -459,22 +533,22 @@ fn json_session(session: &ScanSession, options: ReportOptions) -> JsonSession {
         status: session.status,
         started_at: session.started_at,
         finished_at: session.finished_at,
-        findings: session
-            .findings
+        findings: reportable_ranked(session)
             .iter()
-            .filter(|f| f.status.is_reportable())
-            .map(|f| json_finding(f, options))
+            .map(|r| json_finding(r, options))
             .collect(),
     }
 }
 
-fn json_finding(finding: &Finding, options: ReportOptions) -> JsonFinding {
+fn json_finding(ranked: &RankedFinding, options: ReportOptions) -> JsonFinding {
+    let finding = ranked.finding;
     JsonFinding {
         finding_type: finding.scanner_id.clone(),
         severity: finding.severity,
         target: finding.target.full_url().to_string(),
         status: finding.status,
         title: finding.title.clone(),
+        occurrences: ranked.occurrences,
         description: finding.description.clone(),
         evidence: if options.include_evidence {
             finding.evidence.clone()
@@ -497,7 +571,8 @@ fn render_csv(sessions: &[ScanSession]) -> String {
     out.push_str(CSV_HEADER);
     out.push('\n');
     for session in sessions {
-        for finding in session.findings.iter().filter(|f| f.status.is_reportable()) {
+        for ranked in reportable_ranked(session) {
+            let finding = ranked.finding;
             let row = [
                 session.id.to_string(),
                 finding.target.base_url().to_string(),
@@ -530,13 +605,14 @@ fn csv_escape(field: &str) -> String {
 /// Render a single session as a HackerOne-shaped submission, built around its
 /// most-severe finding. Errors when the session has no reportable findings.
 fn render_hackerone(session: &ScanSession, options: ReportOptions) -> Result<String> {
-    let findings = reportable_most_severe_first(session);
-    let Some((lead, rest)) = findings.split_first() else {
+    let findings = reportable_ranked(session);
+    let Some((lead_ranked, rest)) = findings.split_first() else {
         return Err(Error::Other(format!(
             "session {} has no reportable findings to report",
             session.id
         )));
     };
+    let lead = lead_ranked.finding;
 
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", lead.title));
@@ -546,6 +622,9 @@ fn render_hackerone(session: &ScanSession, options: ReportOptions) -> Result<Str
         "**Severity:** {}\n\n",
         severity_label(lead.severity)
     ));
+    if lead_ranked.occurrences > 1 {
+        out.push_str(&format!("Observed {} times.\n\n", lead_ranked.occurrences));
+    }
     match &lead.description {
         Some(description) => {
             out.push_str(description);
@@ -583,7 +662,8 @@ fn render_hackerone(session: &ScanSession, options: ReportOptions) -> Result<Str
 
     if !rest.is_empty() {
         out.push_str("## Additional Findings\n\n");
-        for finding in rest {
+        for ranked in rest {
+            let finding = ranked.finding;
             out.push_str(&format!(
                 "- **{}** (`{}`, {}) — {}\n",
                 finding.title,
@@ -932,6 +1012,183 @@ mod tests {
             matches!(err, Error::Other(_)),
             "expected nothing-to-report error, got {err:?}"
         );
+    }
+
+    // -- Consolidation & ranking -------------------------------------------
+
+    /// A finding with the given scanner/endpoint/title/severity/status, for the
+    /// consolidation and ordering tests.
+    fn f(scanner: &str, url: &str, title: &str, sev: Severity, status: Status) -> Finding {
+        Finding::builder(scanner, target(url), title)
+            .severity(sev)
+            .status(status)
+            .build()
+    }
+
+    #[test]
+    fn repeated_identical_findings_collapse_with_a_count() {
+        // Three findings sharing scanner + endpoint + title collapse to one.
+        let findings = [
+            f(
+                "idor",
+                "https://api.example.com/users/1",
+                "Enumerable ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "idor",
+                "https://api.example.com/users/1",
+                "Enumerable ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "idor",
+                "https://api.example.com/users/1",
+                "Enumerable ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+        ];
+        let ranked = consolidate_and_rank(findings.iter());
+        assert_eq!(ranked.len(), 1, "identical findings collapse to one");
+        assert_eq!(ranked[0].occurrences, 3, "count reflects observations");
+    }
+
+    #[test]
+    fn findings_differing_in_key_are_not_collapsed() {
+        // Differ in scanner, endpoint, and title respectively — all stay separate.
+        let findings = [
+            f(
+                "idor",
+                "https://api.example.com/a",
+                "Ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "bac",
+                "https://api.example.com/a",
+                "Ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "idor",
+                "https://api.example.com/b",
+                "Ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "idor",
+                "https://api.example.com/a",
+                "Other",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+        ];
+        let ranked = consolidate_and_rank(findings.iter());
+        assert_eq!(ranked.len(), 4, "distinct findings remain separate");
+        assert!(ranked.iter().all(|r| r.occurrences == 1));
+    }
+
+    #[test]
+    fn ranks_vulnerable_before_lesser_status_then_by_severity() {
+        // A low-severity vulnerable outranks a critical-severity info finding
+        // (status dominates); within a status, higher severity leads.
+        let findings = [
+            f(
+                "a",
+                "https://api.example.com/1",
+                "info-crit",
+                Severity::Critical,
+                Status::Info,
+            ),
+            f(
+                "b",
+                "https://api.example.com/2",
+                "vuln-low",
+                Severity::Low,
+                Status::Vulnerable,
+            ),
+            f(
+                "c",
+                "https://api.example.com/3",
+                "vuln-high",
+                Severity::High,
+                Status::Vulnerable,
+            ),
+            f(
+                "d",
+                "https://api.example.com/4",
+                "safe-high",
+                Severity::High,
+                Status::Safe,
+            ),
+        ];
+        let ranked = consolidate_and_rank(findings.iter());
+        let titles: Vec<&str> = ranked.iter().map(|r| r.finding.title.as_str()).collect();
+        assert_eq!(titles, ["vuln-high", "vuln-low", "safe-high", "info-crit"]);
+    }
+
+    #[test]
+    fn equal_rank_ordering_is_stable_and_repeatable() {
+        // Two equal-rank findings (same status + severity) keep their first-seen
+        // order, and repeating the operation yields the same order every time.
+        let findings = [
+            f(
+                "z",
+                "https://api.example.com/z",
+                "Zed",
+                Severity::High,
+                Status::Vulnerable,
+            ),
+            f(
+                "a",
+                "https://api.example.com/a",
+                "Aye",
+                Severity::High,
+                Status::Vulnerable,
+            ),
+        ];
+        for _ in 0..5 {
+            let ranked = consolidate_and_rank(findings.iter());
+            let titles: Vec<&str> = ranked.iter().map(|r| r.finding.title.as_str()).collect();
+            assert_eq!(titles, ["Zed", "Aye"], "equal-rank order is stable");
+        }
+    }
+
+    #[test]
+    fn markdown_collapses_duplicates_and_shows_the_count() {
+        let mut session =
+            ScanSession::new(vec![target("https://api.example.com")], vec!["idor".into()]);
+        session.findings = vec![
+            f(
+                "idor",
+                "https://api.example.com/users/1",
+                "Enumerable ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+            f(
+                "idor",
+                "https://api.example.com/users/1",
+                "Enumerable ref",
+                Severity::Medium,
+                Status::Vulnerable,
+            ),
+        ];
+        let md = render_markdown(&session, ReportOptions::default());
+        // Collapsed to a single reported finding with an occurrence count.
+        assert!(md.contains("Total findings: 1"), "collapsed to one finding");
+        assert_eq!(
+            md.matches("Enumerable ref").count(),
+            1,
+            "the finding appears once, not twice"
+        );
+        assert!(md.contains("- **Occurrences:** 2"), "count is surfaced");
     }
 
     // A minimal RFC 4180 CSV parser for the escaping assertions.
