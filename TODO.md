@@ -28,14 +28,11 @@ And it must serve the thesis: **slow, deep, thorough, stealthy, finds the occult
 
 ### Detections / correlation
 - [ ] Cross-endpoint / stateful reasoning — bugs that only appear across a multi-step flow.
-- [ ] Auth-differential testing — run the same surface as anon / user-A / user-B / admin and
-      diff the responses (where real access-control bugs hide).
-- [ ] Change-detection / diffing for unattended runs — "what changed since last run," so a
-      week-long run surfaces deltas, not 10,000 findings.
-- [ ] Signal-vs-noise ranking — ruthless prioritization; low false-positive output is
-      existential for unattended use.
 - [ ] AI-assisted correlation — connect findings with the analysis model (analysis only, never
       action; keyless/self-hosted to avoid refusals on authorized work).
+
+> Graduated to `openspec/changes/`: auth-differential testing, signal-vs-noise ranking,
+> change-detection/run diffing.
 
 ### Surfaces
 - [ ] Deep surface mapping — subdomain takeover, origin-IP discovery behind CDN/WAF,
