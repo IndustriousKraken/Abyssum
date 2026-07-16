@@ -1,2 +1,39 @@
 # Rust build artifacts
 /target
+
+# --- AI coding assistants / agent CLIs (local & personal files) ---
+# Shared guidance stays tracked: CLAUDE.md, AGENTS.md, OCTOPUS.md, and any
+# committed .claude/ commands or skills. Only personal/ephemeral files below.
+
+# Claude Code
+CLAUDE.local.md
+.claude/settings.local.json
+
+# opencode
+opencode.json
+.opencode/
+
+# aider
+.aider*
+
+# Cursor
+.cursor/
+
+# Continue
+.continue/
+
+# Windsurf / Codeium
+.windsurf/
+.codeium/
+
+# Gemini CLI
+.gemini/
+
+# OpenAI Codex CLI
+.codex/
+
+# Charmbracelet Crush
+.crush/
+
+# --- OS cruft ---
+.DS_Store

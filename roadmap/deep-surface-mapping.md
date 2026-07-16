@@ -1,8 +1,12 @@
 ---
 title: Deep surface mapping
-status: deferred
+status: planned
 added: 2026-07-16
 ---
+
+**First slice spec'd** as change `e01-add-subdomain-recon` (passive subdomain discovery +
+takeover detection). The rest below — origin-IP-behind-CDN, ASN/netblock enumeration,
+forgotten cloud assets, and active DNS brute-force — remains deferred as follow-on slices.
 
 Find the infrastructure people forgot they exposed:
 - **Subdomain takeover** — dangling DNS pointing at unclaimed cloud resources.
