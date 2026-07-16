@@ -19,6 +19,10 @@ that differ in scanner, target/endpoint, or class SHALL remain separate.
 - **THEN** they SHALL remain separate findings
 
 ### Requirement: Rank Findings By Importance
+This requirement MODIFIES the canonical `report-generation` spec's ordering rules:
+- The 'Findings ordered most-severe-first' scenario under 'Markdown Submission Report' is modified so that findings are ordered by status (vulnerable first, then safe, then informational) and within each status by descending severity, rather than by severity alone.
+- The 'Lead with the most-severe finding' scenario under 'HackerOne-Formatted Export' is modified so that the lead finding is the most important finding per this ranking (vulnerable status first, then highest severity) rather than purely the highest severity.
+
 Reported findings SHALL be ordered by importance: findings with vulnerable status
 before those with safe or informational status, then by descending severity. Ordering
 SHALL be deterministic, so that findings of equal rank keep a stable, repeatable order.
