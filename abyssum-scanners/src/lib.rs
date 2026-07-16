@@ -55,6 +55,7 @@ pub fn register_builtins(registry: &mut ScannerRegistry, store: &ReferenceStore)
     // seeded store (graphql_paths / graphql_queries).
     graphql::register(registry, store);
     // The subdomain-recon scanner's passive sources and takeover fingerprints are
-    // inline, so it reads no seeded store either.
-    subdomain_recon::register(registry);
+    // inline, but its opt-in active brute-force joins the seeded `subdomains`
+    // wordlist onto the apex, so it takes the store.
+    subdomain_recon::register(registry, store);
 }

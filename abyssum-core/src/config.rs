@@ -88,6 +88,11 @@ pub struct ScanningConfig {
     /// (every outbound request may present a fresh realistic identity); per-scan
     /// pins one identity for the duration of a scan. See `add-seed-data`.
     pub user_agent_rotation: UserAgentRotation,
+    /// Whether the subdomain-recon scanner may perform active DNS brute-force
+    /// (join the seeded wordlist onto the apex and test each candidate for
+    /// existence). Off by default: reconnaissance stays passive unless the operator
+    /// deliberately opts in (conservative-by-default, aggression opt-in).
+    pub subdomain_bruteforce: bool,
 }
 
 /// Granularity of the engine's default User-Agent rotation.
@@ -201,6 +206,7 @@ impl Default for ScanningConfig {
             max_delay: 3.0,
             max_concurrency: 4,
             user_agent_rotation: UserAgentRotation::default(),
+            subdomain_bruteforce: false,
         }
     }
 }
@@ -303,6 +309,10 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION") {
             self.scanning.user_agent_rotation =
                 parse_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE") {
+            self.scanning.subdomain_bruteforce =
+                parse_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS") {
             self.auth.session_absolute_max_hours =

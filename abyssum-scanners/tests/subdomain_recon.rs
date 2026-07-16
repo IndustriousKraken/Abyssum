@@ -115,13 +115,29 @@ async fn dead_authority() -> String {
 // --- Scan helpers -----------------------------------------------------------
 
 fn ctx() -> ScanContext {
+    ctx_with(Config::default())
+}
+
+/// A context with active subdomain brute-force turned on (off by default).
+fn ctx_bruteforce() -> ScanContext {
+    let mut config = Config::default();
+    config.scanning.subdomain_bruteforce = true;
+    ctx_with(config)
+}
+
+fn ctx_with(config: Config) -> ScanContext {
     ScanContext::new(
-        Arc::new(Config::default()),
+        Arc::new(config),
         RateLimiter::new(Duration::ZERO, Duration::ZERO),
         Arc::new(SingleUserAgent::default()),
         CancellationToken::new(),
     )
 }
+
+/// A DoH JSON body that resolves (NOERROR + an A record) — the name exists.
+const DOH_EXISTS: &str = r#"{"Status":0,"Answer":[{"name":"x","type":1,"data":"93.184.216.34"}]}"#;
+/// A DoH JSON body for NXDOMAIN — the name does not exist.
+const DOH_NXDOMAIN: &str = r#"{"Status":3}"#;
 
 /// An apex target probed over plain HTTP, so probes reach the localhost mocks.
 fn apex() -> Target {
@@ -268,6 +284,114 @@ async fn registered_via_builtins_and_selectable() {
     );
     let scanner = registry.create("subdomain_recon").unwrap();
     assert_eq!(scanner.id(), "subdomain_recon");
+}
+
+/// Task 6 (brute-force OFF): with brute-force disabled (the default config) the
+/// scanner never touches the DoH resolver, even when a brute-force wordlist is
+/// present — reconnaissance stays passive.
+#[tokio::test]
+async fn bruteforce_disabled_does_no_wordlist_probing() {
+    let doh = start_mock(200, DOH_EXISTS).await;
+    let live = start_mock(200, "<html>up</html>").await;
+
+    // Passive discovery is empty; a brute-force candidate is supplied but must be
+    // ignored while the feature is off.
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh.authority)).unwrap());
+
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "nothing is discovered when off: {findings:#?}"
+    );
+    assert!(
+        doh.requests.lock().unwrap().is_empty(),
+        "the DoH resolver is never queried when brute-force is off"
+    );
+    assert!(
+        live.requests.lock().unwrap().is_empty(),
+        "no wordlist candidate is probed when brute-force is off"
+    );
+}
+
+/// Task 6 (brute-force ON): with brute-force enabled and a stubbed resolver, a
+/// candidate the resolver confirms exists is routed into the same liveness
+/// evaluation as a passive one and surfaces as a finding. The existence test goes
+/// through the paced `send` path (percent-encoded DoH query + rotating UA).
+#[tokio::test]
+async fn bruteforce_enabled_discovers_and_evaluates_existing_candidate() {
+    let doh = start_mock(200, DOH_EXISTS).await;
+    let live = start_mock(200, "<html><body>real service</body></html>").await;
+
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh.authority)).unwrap());
+
+    let findings = scanner.scan(&apex(), &ctx_bruteforce()).await.unwrap();
+
+    // The resolver was queried for the candidate, through the paced send path.
+    let doh_requests = doh.requests.lock().unwrap();
+    assert_eq!(
+        doh_requests.len(),
+        1,
+        "the candidate was existence-tested once"
+    );
+    let head = &doh_requests[0];
+    assert!(head.contains("type=A"), "an A record was queried: {head}");
+    assert!(
+        head.contains("name=127.0.0.1"),
+        "the candidate name was queried: {head}"
+    );
+    assert!(
+        head.to_lowercase().contains("user-agent:"),
+        "the existence test carried a rotating User-Agent (went through send): {head}"
+    );
+
+    // The confirmed candidate was probed and reported exactly like a passive one.
+    assert_eq!(
+        findings.len(),
+        1,
+        "the confirmed candidate yields a finding: {findings:#?}"
+    );
+    assert_eq!(findings[0].status, Status::Info);
+    assert_eq!(
+        findings[0].evidence.as_ref().unwrap()["host"],
+        live.authority
+    );
+    assert!(
+        !live.requests.lock().unwrap().is_empty(),
+        "the confirmed host was probed"
+    );
+}
+
+/// Task 3 (existence gate): a candidate the resolver reports as NXDOMAIN is not
+/// probed for liveness — the DoH check gates the liveness probe.
+#[tokio::test]
+async fn bruteforce_skips_candidate_that_does_not_resolve() {
+    let doh = start_mock(200, DOH_NXDOMAIN).await;
+    let live = start_mock(200, "<html>up</html>").await;
+
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh.authority)).unwrap());
+
+    let findings = scanner.scan(&apex(), &ctx_bruteforce()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "a non-existent candidate yields nothing: {findings:#?}"
+    );
+    assert_eq!(
+        doh.requests.lock().unwrap().len(),
+        1,
+        "the candidate was existence-tested"
+    );
+    assert!(
+        live.requests.lock().unwrap().is_empty(),
+        "a candidate that does not resolve is never probed for liveness"
+    );
 }
 
 /// A hostless / pathful target is rejected before any traffic: recon needs a bare

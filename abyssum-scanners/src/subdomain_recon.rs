@@ -1,10 +1,19 @@
-//! Subdomain reconnaissance — passive surface mapping, first slice.
+//! Subdomain reconnaissance — passive surface mapping plus opt-in active brute-force.
 //!
 //! [`SubdomainReconScanner`] takes an apex domain, discovers candidate subdomains
 //! from **passive** certificate-transparency / passive-DNS sources (a CT-log
 //! aggregator such as crt.sh — querying a third party, never brute-forcing the
 //! target's own DNS), probes each candidate for liveness, and flags subdomain
 //! takeover from the probe response.
+//!
+//! An **opt-in active brute-force** source (e02) complements the passive one: it
+//! joins the seeded `subdomains` wordlist onto the apex, tests each candidate for
+//! existence via DNS-over-HTTPS (through the same paced request path, so no DNS
+//! resolver dependency is added and the traffic is paced like everything else), and
+//! routes the confirmed-existing names into the *same* liveness + takeover
+//! evaluation as passively-discovered ones. It is **disabled by default**
+//! (`scanning.subdomain_bruteforce`): reconnaissance stays passive unless the
+//! operator turns it on — conservative-by-default, aggression opt-in.
 //!
 //! Like every scanner it owns none of the cross-cutting concerns: every source
 //! query and every probe goes through [`ScanContext::send`], so the pacing floor,
@@ -25,8 +34,8 @@
 //!   service, *instead of* the plain info finding (one finding per host).
 //!
 //! Takeover detection here is HTTP-fingerprint based and needs no DNS-resolver
-//! dependency; CNAME-chain confirmation and active DNS brute-force are follow-on
-//! slices (see `roadmap/deep-surface-mapping.md`).
+//! dependency; CNAME-chain confirmation is a follow-on slice (see
+//! `roadmap/deep-surface-mapping.md`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -35,8 +44,8 @@ use async_trait::async_trait;
 use url::Url;
 
 use abyssum_core::{
-    BaseScanner, Error, Finding, ProgressUpdate, RequestSpec, Result, ScanContext, ScannerFactory,
-    ScannerRegistry, Severity, Status, Target,
+    BaseScanner, Error, Finding, ProgressUpdate, ReferenceStore, RequestSpec, Result, ScanContext,
+    ScannerFactory, ScannerRegistry, Severity, Status, Target,
 };
 
 /// The stable scanner id. The registry keys on this and a scan selects by it; it
@@ -60,6 +69,20 @@ const MAX_CANDIDATES: usize = 512;
 /// takeover fingerprints all appear near the top of a short error page, so a
 /// capped prefix is sufficient and the rest is never read into memory.
 const MAX_BODY_BYTES: usize = 512 * 1024;
+
+/// The seeded wordlist the active brute-force source joins onto the apex.
+const WORDLIST_SUBDOMAINS: &str = "subdomains";
+
+/// Default DNS-over-HTTPS resolver (JSON API). Existence tests query
+/// `{base}?name=<host>&type=A` with `Accept: application/dns-json`, through the
+/// paced request path — so brute-force adds no DNS-resolver dependency and its
+/// lookups are paced and User-Agent-rotated like every other request.
+const DOH_BASE: &str = "https://cloudflare-dns.com/dns-query";
+
+/// Upper bound on how many wordlist-generated candidates are existence-tested in
+/// one run. The seeded list is small, but an operator may swap in a large one;
+/// beyond this the wordlist is truncated and the drop is logged, never silent.
+const MAX_BRUTEFORCE_CANDIDATES: usize = 2048;
 
 /// Known unclaimed-service takeover fingerprints: `(service, lowercase body
 /// marker)`. A live subdomain whose response body contains a marker is pointing
@@ -103,10 +126,25 @@ enum Discovery {
     Fixed(Vec<String>),
 }
 
-/// Discovers subdomains from passive sources, probes them for liveness, and flags
-/// subdomain takeover.
+/// Where the opt-in active brute-force source draws its candidate hosts. Whether
+/// it runs at all is gated at scan time on `config.scanning.subdomain_bruteforce`
+/// (OFF by default); this only says *where the candidates come from* when it does.
+enum BruteSource {
+    /// The seeded `subdomains` wordlist, joined onto the scan's apex (production).
+    Store(ReferenceStore),
+    /// A fixed, pre-formed candidate-host list — bypasses the wordlist+join step.
+    /// Used by tests, and by callers supplying their own brute-force candidates.
+    Fixed(Vec<String>),
+}
+
+/// Discovers subdomains from passive sources (and, when enabled, active
+/// brute-force), probes them for liveness, and flags subdomain takeover.
 pub struct SubdomainReconScanner {
     discovery: Discovery,
+    /// Candidate source for the opt-in active brute-force pass.
+    brute: BruteSource,
+    /// DNS-over-HTTPS resolver base for brute-force existence tests.
+    doh_base: Url,
 }
 
 impl SubdomainReconScanner {
@@ -114,13 +152,18 @@ impl SubdomainReconScanner {
     pub const ID: &'static str = ID;
 
     /// Build the production scanner: passive discovery via the default crt.sh
-    /// certificate-transparency aggregator.
+    /// certificate-transparency aggregator, with active brute-force available but
+    /// gated OFF by default. Callers with a seeded store use [`register`] (which
+    /// attaches the wordlist); a bare `new()` has no wordlist, so brute-force —
+    /// even if enabled — has nothing to probe.
     pub fn new() -> Self {
         Self {
             discovery: Discovery::Passive {
                 // The default base is a valid absolute URL, so this never fails.
                 crtsh_base: Url::parse(CRTSH_BASE).expect("CRTSH_BASE is a valid URL"),
             },
+            brute: BruteSource::Fixed(Vec::new()),
+            doh_base: default_doh_base(),
         }
     }
 
@@ -129,6 +172,7 @@ impl SubdomainReconScanner {
     pub fn with_source_base(base: Url) -> Self {
         Self {
             discovery: Discovery::Passive { crtsh_base: base },
+            ..Self::new()
         }
     }
 
@@ -142,7 +186,34 @@ impl SubdomainReconScanner {
     {
         Self {
             discovery: Discovery::Fixed(candidates.into_iter().map(Into::into).collect()),
+            ..Self::new()
         }
+    }
+
+    /// Attach the seeded `subdomains` wordlist as the active brute-force source
+    /// (the production wiring; see [`register`]). Brute-force still only runs when
+    /// `scanning.subdomain_bruteforce` is enabled.
+    pub fn with_bruteforce_store(mut self, store: ReferenceStore) -> Self {
+        self.brute = BruteSource::Store(store);
+        self
+    }
+
+    /// Set fixed, pre-formed brute-force candidate hosts, bypassing the wordlist
+    /// join (for tests and callers supplying their own candidates).
+    pub fn with_bruteforce_candidates<I, S>(mut self, candidates: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.brute = BruteSource::Fixed(candidates.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Point brute-force existence tests at the DoH-style resolver at `base` (for
+    /// tests that stub the resolver with a local mock).
+    pub fn with_doh_base(mut self, base: Url) -> Self {
+        self.doh_base = base;
+        self
     }
 
     /// Gather the raw candidate names for `apex` from the configured source. Every
@@ -154,6 +225,72 @@ impl SubdomainReconScanner {
             Discovery::Passive { crtsh_base } => crtsh_query(crtsh_base, apex, ctx).await,
         }
     }
+
+    /// The normalized, deduplicated brute-force candidate hosts for `apex`: the
+    /// seeded wordlist joined onto the apex (store source) or the fixed candidate
+    /// list as-is (test/caller source). A missing wordlist contributes nothing.
+    async fn brute_candidates(&self, apex: &str) -> Result<Vec<String>> {
+        match &self.brute {
+            BruteSource::Fixed(list) => Ok(normalize_candidates(list.clone(), apex)),
+            BruteSource::Store(store) => {
+                let words = store.wordlist_values(WORDLIST_SUBDOMAINS).await?;
+                Ok(generate_candidates(words, apex))
+            }
+        }
+    }
+
+    /// Run the active brute-force pass for `apex`: generate wordlist candidates
+    /// (deduped against the already-discovered `passive` set), cap the wordlist,
+    /// and existence-test each surviving candidate over DNS-over-HTTPS through the
+    /// paced request path. Returns the candidates confirmed to exist, for the
+    /// caller to route into the same liveness + takeover evaluation as passive
+    /// ones.
+    async fn bruteforce(
+        &self,
+        apex: &str,
+        passive: &[String],
+        ctx: &ScanContext,
+    ) -> Result<Vec<String>> {
+        let already: HashSet<&str> = passive.iter().map(String::as_str).collect();
+        let generated: Vec<String> = self
+            .brute_candidates(apex)
+            .await?
+            .into_iter()
+            .filter(|host| !already.contains(host.as_str()))
+            .collect();
+
+        let (candidates, dropped) = cap_candidates(generated, MAX_BRUTEFORCE_CANDIDATES);
+        if dropped > 0 {
+            tracing::warn!(
+                scanner = ID,
+                apex = %apex,
+                cap = MAX_BRUTEFORCE_CANDIDATES,
+                dropped,
+                "brute-force wordlist produced more candidates than the probe cap; \
+                 testing the first {MAX_BRUTEFORCE_CANDIDATES} and dropping {dropped}"
+            );
+        }
+
+        let mut confirmed = Vec::new();
+        for host in &candidates {
+            // Stop promptly on cancellation, keeping what has been confirmed so far.
+            if ctx.is_cancelled() {
+                break;
+            }
+            // A confirmed name joins the probe set; a non-existent one (NXDOMAIN)
+            // or an unreachable resolver is simply not confirmed — never fatal.
+            if doh_resolves(&self.doh_base, host, ctx).await? {
+                confirmed.push(host.clone());
+            }
+        }
+        Ok(confirmed)
+    }
+}
+
+/// The default DoH resolver base. [`DOH_BASE`] is a valid absolute URL, so this
+/// never fails.
+fn default_doh_base() -> Url {
+    Url::parse(DOH_BASE).expect("DOH_BASE is a valid URL")
 }
 
 impl Default for SubdomainReconScanner {
@@ -206,7 +343,16 @@ impl BaseScanner for SubdomainReconScanner {
         let scheme = target.base_url().scheme();
 
         let raw = self.discover(&apex, ctx).await?;
-        let candidates = normalize_candidates(raw, &apex);
+        let mut candidates = normalize_candidates(raw, &apex);
+
+        // Active brute-force is opt-in and OFF by default: only when the operator
+        // has enabled it does reconnaissance leave the passive path. Confirmed-
+        // existing brute-force candidates join the same probe set, so they flow
+        // into the identical liveness + takeover evaluation as passive ones.
+        if ctx.config().scanning.subdomain_bruteforce {
+            let confirmed = self.bruteforce(&apex, &candidates, ctx).await?;
+            candidates.extend(confirmed);
+        }
 
         // Cap the probe set to a sane bound, logging the truncation rather than
         // silently dropping the tail.
@@ -240,7 +386,7 @@ impl BaseScanner for SubdomainReconScanner {
                 }
             };
 
-            match probe(ctx, url.clone()).await {
+            match probe(ctx, RequestSpec::get(url.clone())).await {
                 Ok(response) => {
                     findings.push(finding_for(target, host, &url, &response));
                 }
@@ -268,12 +414,16 @@ impl BaseScanner for SubdomainReconScanner {
     }
 }
 
-/// Register the subdomain-recon scanner under its stable id. It carries no seeded
-/// store (its passive sources and takeover fingerprints are inline), so the
-/// factory ignores the config it is handed.
-pub fn register(registry: &mut ScannerRegistry) {
-    let factory: ScannerFactory =
-        Arc::new(|_config| Box::new(SubdomainReconScanner::new()) as Box<dyn BaseScanner>);
+/// Register the subdomain-recon scanner under its stable id, attaching the seeded
+/// `subdomains` wordlist as the active brute-force source. Whether that source
+/// runs is decided per scan from `config.scanning.subdomain_bruteforce` (read from
+/// the [`ScanContext`]), OFF by default — so the factory needs no config itself.
+pub fn register(registry: &mut ScannerRegistry, store: &ReferenceStore) {
+    let store = store.clone();
+    let factory: ScannerFactory = Arc::new(move |_config| {
+        Box::new(SubdomainReconScanner::new().with_bruteforce_store(store.clone()))
+            as Box<dyn BaseScanner>
+    });
     registry.register(ID, factory);
 }
 
@@ -389,6 +539,71 @@ fn cap_candidates(mut candidates: Vec<String>, cap: usize) -> (Vec<String>, usiz
     (candidates, dropped)
 }
 
+/// Join each wordlist `word` onto `apex` to form a candidate host, then normalize
+/// and deduplicate the result. Blank words are skipped; a word carrying stray
+/// leading/trailing dots is cleaned before joining, so the seeded list and an
+/// operator's custom list both behave. Pure (no network) so it is unit-testable.
+fn generate_candidates<I, S>(words: I, apex: &str) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let joined = words.into_iter().filter_map(|word| {
+        let label = word.as_ref().trim().trim_matches('.').to_ascii_lowercase();
+        (!label.is_empty()).then(|| format!("{label}.{apex}"))
+    });
+    normalize_candidates(joined, apex)
+}
+
+/// Existence test for one brute-force candidate over DNS-over-HTTPS, through the
+/// paced request path. Queries the DoH JSON API for an `A` record and reports
+/// whether the name resolves. Best-effort: a non-success resolver status or a
+/// transport failure yields `false` (unconfirmed) rather than aborting the scan;
+/// cancellation propagates.
+async fn doh_resolves(doh_base: &Url, host: &str, ctx: &ScanContext) -> Result<bool> {
+    let mut url = doh_base.clone();
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("name", host)
+        .append_pair("type", "A");
+    // The DoH JSON API is selected by the `application/dns-json` Accept header.
+    let spec = RequestSpec::get(url).header("Accept", "application/dns-json");
+
+    match probe(ctx, spec).await {
+        Ok(response) if (200..300).contains(&response.status) => {
+            Ok(doh_indicates_exists(&response.body))
+        }
+        Ok(_) => Ok(false),
+        Err(Error::Cancelled) => Err(Error::Cancelled),
+        Err(err) => {
+            tracing::debug!(
+                scanner = ID,
+                host = %host,
+                error = %err,
+                "DoH existence test failed; treating candidate as unresolved"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Whether a DoH JSON response body indicates the queried name exists: DNS status
+/// `0` (NOERROR) and a non-empty `Answer` array (an A/AAAA/CNAME record). NXDOMAIN
+/// (status 3), an empty answer, or an unparseable body all read as "does not
+/// exist". A dangling CNAME to an unclaimed service still resolves NOERROR with a
+/// CNAME answer — so it counts as existing and flows on to takeover evaluation.
+fn doh_indicates_exists(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let status_ok = value.get("Status").and_then(serde_json::Value::as_i64) == Some(0);
+    let has_answer = value
+        .get("Answer")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|answers| !answers.is_empty());
+    status_ok && has_answer
+}
+
 /// Query the crt.sh-style passive source at `base` for `apex`, through the paced
 /// request path, and extract the certificate names it observed. A non-2xx
 /// response, a transport failure, or an unparseable body yields no candidates
@@ -402,7 +617,7 @@ async fn crtsh_query(base: &Url, apex: &str, ctx: &ScanContext) -> Result<Vec<St
         .append_pair("q", &format!("%.{apex}"))
         .append_pair("output", "json");
 
-    let response = match probe(ctx, url).await {
+    let response = match probe(ctx, RequestSpec::get(url)).await {
         Ok(response) => response,
         Err(err) => {
             tracing::warn!(
@@ -450,13 +665,14 @@ fn parse_crtsh(body: &[u8]) -> Vec<String> {
     names
 }
 
-/// Probe one URL through the paced scan context, reducing the response to the
+/// Send one request through the paced scan context, reducing the response to the
 /// status and a length-capped body. The body is streamed through a bounded reader
-/// that buffers at most [`MAX_BODY_BYTES`]: a probed host is untrusted and could
-/// return an unbounded body, and the takeover fingerprints all sit near the top of
-/// a short error page, so an oversized body is capped rather than read whole.
-async fn probe(ctx: &ScanContext, url: Url) -> Result<ProbeResponse> {
-    let mut response = ctx.send(RequestSpec::get(url)).await?;
+/// that buffers at most [`MAX_BODY_BYTES`]: a probed host (or third-party resolver)
+/// is untrusted and could return an unbounded body, and the fingerprints/records we
+/// read all sit near the top of a short response, so an oversized body is capped
+/// rather than read whole.
+async fn probe(ctx: &ScanContext, spec: RequestSpec) -> Result<ProbeResponse> {
+    let mut response = ctx.send(spec).await?;
     let status = response.status().as_u16();
 
     let mut body = Vec::new();
@@ -663,5 +879,44 @@ mod tests {
         assert!(parse_crtsh(b"not json").is_empty());
         assert!(parse_crtsh(b"{}").is_empty());
         assert!(parse_crtsh(b"[]").is_empty());
+    }
+
+    // --- Brute-force candidate generation (task 2) -----------------------------
+
+    #[test]
+    fn generate_joins_wordlist_onto_apex_and_dedupes() {
+        let words = vec!["api", "WWW", "api", "  mail  ", ".dev.", "", "   "];
+        let got = generate_candidates(words, "example.com");
+        assert_eq!(
+            got,
+            vec![
+                "api.example.com".to_string(),
+                "www.example.com".to_string(),  // lowercased
+                "mail.example.com".to_string(), // trimmed
+                "dev.example.com".to_string(),  // stray dots stripped before join
+            ]
+        );
+    }
+
+    // --- DoH existence parsing (task 3) ----------------------------------------
+
+    #[test]
+    fn doh_existence_reads_status_and_answer() {
+        // NOERROR + an A record: the name exists.
+        assert!(doh_indicates_exists(
+            br#"{"Status":0,"Answer":[{"name":"a.example.com","type":1,"data":"93.184.216.34"}]}"#
+        ));
+        // NOERROR + a CNAME (dangling-to-unclaimed-service shape) still exists.
+        assert!(doh_indicates_exists(
+            br#"{"Status":0,"Answer":[{"name":"a.example.com","type":5,"data":"x.s3.amazonaws.com"}]}"#
+        ));
+        // NXDOMAIN: does not exist.
+        assert!(!doh_indicates_exists(br#"{"Status":3}"#));
+        // NOERROR but no answer records: not confirmed.
+        assert!(!doh_indicates_exists(br#"{"Status":0,"Answer":[]}"#));
+        assert!(!doh_indicates_exists(br#"{"Status":0}"#));
+        // Garbage: not confirmed.
+        assert!(!doh_indicates_exists(b"not json"));
+        assert!(!doh_indicates_exists(b""));
     }
 }
