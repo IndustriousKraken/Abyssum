@@ -21,6 +21,10 @@ is centralized.
       lints across all four crates (`abyssum-core`, `abyssum-scanners`,
       `abyssum-cli`, `abyssum-web`). (No `cargo fix --edition` changes were needed
       to compile; applied `cargo clippy --fix` for the 37 `collapsible_if` lints
-      newly enabled by let-chain stabilization.)
+      newly enabled by let-chain stabilization. The 2024 migration lint set is
+      empty here: a clean build under `-W rust-2024-compatibility` plus the named
+      behavioral lints — `tail_expr_drop_order`, `unsafe_op_in_unsafe_fn`,
+      `edition_2024_expr_fragment_specifier` — emits no warnings across all four
+      crates and all targets, so no drop-order/RPIT/unsafe migration applies.)
 - [x] Ensure `cargo build`, `cargo test`, and `cargo clippy --all-targets` pass on
       the new edition.
