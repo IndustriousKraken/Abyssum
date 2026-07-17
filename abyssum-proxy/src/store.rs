@@ -151,6 +151,10 @@ impl TrafficStore {
             && !parent.as_os_str().is_empty()
         {
             tokio::fs::create_dir_all(parent).await?;
+            // The store holds captured Authorization headers, cookies, and bodies —
+            // lock its directory to the owner so no other user can read the DB (or
+            // its `-wal`/`-shm` siblings, which hold uncommitted captures).
+            restrict_to_owner(parent, 0o700).await?;
         }
 
         let options = SqliteConnectOptions::new()
@@ -164,6 +168,11 @@ impl TrafficStore {
             .connect_with(options)
             .await
             .map_err(|e| Error::Store(format!("failed to open traffic store: {e}")))?;
+
+        // The DB file exists once the pool connects — tighten it to owner-only so the
+        // captured credentials it stores are never world-readable (defence in depth
+        // behind the 0o700 directory above).
+        restrict_to_owner(path, 0o600).await?;
 
         // ponytail: one table + a few indexes — a `CREATE TABLE IF NOT EXISTS` on
         // open is all "survive restart" needs; no migration framework for one table.
@@ -415,6 +424,21 @@ fn row_to_exchange(row: &sqlx::sqlite::SqliteRow) -> Result<StoredExchange> {
     Ok(StoredExchange { id, exchange })
 }
 
+/// Restrict `path` to owner-only access on Unix (a no-op elsewhere). Used to keep
+/// the traffic store — which holds captured credentials — unreadable by other users.
+async fn restrict_to_owner(path: impl AsRef<Path>, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(mode)).await?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
 /// Wrap any error from the store layer as an [`Error::Store`].
 fn store_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Store(e.to_string())
@@ -594,5 +618,22 @@ mod tests {
             sink.capture(sample(&format!("/e{i}"), 200, &[], &[]));
         }
         // If capture had blocked, this test would hang rather than complete.
+    }
+
+    /// The DB (captured credentials) is owner-only, and its parent directory is too,
+    /// so no other user can read the store or its `-wal`/`-shm` siblings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_and_parent_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("data");
+        let path = parent.join("traffic.db");
+        let _store = TrafficStore::open(&path).await.unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "DB file is owner-only");
+        let dir_mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "store directory is owner-only");
     }
 }

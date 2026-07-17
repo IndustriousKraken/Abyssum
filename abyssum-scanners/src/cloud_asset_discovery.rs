@@ -313,8 +313,13 @@ fn classify(status: u16) -> Classification {
 /// **never read**: its contents are neither downloaded nor enumerated, and no object
 /// key can surface in a finding. This is what keeps the scanner to existence/exposure
 /// confirmation only. The unread body is dropped with the response.
+///
+/// The probe is sent **without** the target's credential: probes go to third-party
+/// cloud-provider hosts (and, since the scanner guesses bucket names, potentially to
+/// an attacker-squatted bucket), so attaching the target's bearer token / cookie
+/// would leak it. Mirrors the BAC scanner's `probe`.
 async fn probe_status(ctx: &ScanContext, url: Url) -> Result<u16> {
-    let response = ctx.send(RequestSpec::get(url)).await?;
+    let response = ctx.send(RequestSpec::get(url).without_credential()).await?;
     Ok(response.status().as_u16())
 }
 

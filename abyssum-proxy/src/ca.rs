@@ -141,14 +141,26 @@ fn ca_params() -> Result<CertificateParams> {
     Ok(params)
 }
 
-/// Write a private-key file with owner-only permissions where the platform allows.
+/// Write a private-key file with owner-only permissions from the moment it is
+/// created — never a window where the CA key (which can mint intercepting certs) is
+/// world-readable. On Unix the file is opened `create_new` with mode `0o600`; other
+/// platforms fall back to a plain write.
 async fn write_private(path: &PathBuf, contents: &str) -> Result<()> {
-    tokio::fs::write(path, contents.as_bytes()).await?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        tokio::fs::set_permissions(path, perms).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .await?;
+        file.write_all(contents.as_bytes()).await?;
+        file.flush().await?;
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(path, contents.as_bytes()).await?;
     }
     Ok(())
 }
@@ -156,4 +168,24 @@ async fn write_private(path: &PathBuf, contents: &str) -> Result<()> {
 /// Wrap an rcgen/rustls error as an [`Error::Tls`].
 fn ca_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Tls(e.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The persisted CA key — which can mint intercepting certs — is owner-only from
+    /// creation, never briefly world-readable.
+    #[tokio::test]
+    async fn ca_key_file_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        CertAuthority::load_or_create(dir.path()).await.unwrap();
+        let mode = std::fs::metadata(dir.path().join("ca_key.pem"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "CA key file is owner-only");
+    }
 }

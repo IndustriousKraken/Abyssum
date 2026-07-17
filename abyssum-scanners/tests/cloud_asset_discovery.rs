@@ -18,8 +18,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use abyssum_core::{
-    BaseScanner, Config, DatabaseManager, RateLimiter, ScanContext, ScannerRegistry, Severity,
-    SingleUserAgent, Status, Target,
+    BaseScanner, Config, Credential, DatabaseManager, RateLimiter, ScanContext, ScannerRegistry,
+    Severity, SingleUserAgent, Status, Target,
 };
 use abyssum_scanners::{CloudAssetDiscoveryScanner, register_builtins};
 
@@ -206,6 +206,45 @@ async fn public_denied_and_missing_buckets_classified_correctly() {
             "candidate {name} was probed once at its bucket root: {requests:#?}"
         );
     }
+}
+
+/// The target's credential must NOT leak to third-party cloud providers: probes go
+/// to S3/GCS/Azure hosts (and, since the scanner guesses names, potentially to a
+/// squatted bucket), so no probe may carry the target's `Authorization` / `Cookie`.
+/// Mirrors BAC's `every_probe_is_sent_without_credentials`.
+#[tokio::test]
+async fn probes_never_carry_the_target_credential() {
+    let mock = start_mock().await;
+
+    let scanner = CloudAssetDiscoveryScanner::new()
+        .with_candidates(["public-bucket", "missing-bucket"])
+        .with_providers([mock_provider(&mock)]);
+
+    // The context carries BOTH a bearer token and a cookie; neither must leak.
+    let ctx = ctx().with_credential(Credential {
+        bearer: Some("super-secret-token".to_string()),
+        cookie: Some("session=abc123".to_string()),
+    });
+    let findings = scanner
+        .scan(&Target::parse("https://example.com").unwrap(), &ctx)
+        .await
+        .unwrap();
+    assert!(!findings.is_empty(), "the public bucket is still found");
+
+    let requests = mock.requests.lock().unwrap();
+    assert!(!requests.is_empty(), "probes were issued");
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.to_lowercase().contains("authorization:")),
+        "no probe may carry an Authorization header: {requests:#?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.to_lowercase().contains("cookie:")),
+        "no probe may carry a Cookie header: {requests:#?}"
+    );
 }
 
 /// Selectable by id: the scanner registers via `register_builtins` and is created by
