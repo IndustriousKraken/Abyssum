@@ -14,6 +14,7 @@
 //!
 //! [`run`] wires these together from a [`ProxyConfig`] for the binary.
 
+pub mod analysis;
 pub mod ca;
 pub mod error;
 pub mod server;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
+pub use analysis::{Analysis, Flag, analyze};
 pub use ca::CertAuthority;
 pub use error::{Error, Result};
 pub use server::ProxyServer;

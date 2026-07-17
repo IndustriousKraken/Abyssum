@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{QueryBuilder, Row, Sqlite};
 
+use crate::analysis::{Flag, analyze};
 use crate::error::{Error, Result};
 
 /// Default cap on rows returned by [`TrafficStore::query`] when the query does not
@@ -61,13 +62,19 @@ pub struct CapturedExchange {
 }
 
 /// A stored exchange, as returned by [`TrafficStore::query`]. Carries its stable
-/// row id plus everything captured.
+/// row id plus everything captured, and the analysis (auto-flags + interest score)
+/// persisted alongside it.
 #[derive(Debug, Clone)]
 pub struct StoredExchange {
     /// Stable, never-reused row id.
     pub id: i64,
     /// The captured exchange.
     pub exchange: CapturedExchange,
+    /// Auto-detected security-relevant categories, persisted with the row.
+    pub flags: Vec<Flag>,
+    /// Additive interest score summed from [`flags`](Self::flags); higher ranks
+    /// ahead in the triage view. A ranking aid, not a verdict.
+    pub score: i64,
 }
 
 /// Criteria for [`TrafficStore::query`]. Every field is optional and combined with
@@ -88,6 +95,11 @@ pub struct TrafficQuery {
     pub from: Option<DateTime<Utc>>,
     /// Inclusive upper bound on the start time.
     pub to: Option<DateTime<Utc>>,
+    /// An auto-flag category that must be present (e.g. `auth`, `idor`).
+    pub flag: Option<String>,
+    /// Order highest-interest first (by score) rather than newest first. This is
+    /// the triage view: interesting traffic surfaces ahead of the noise.
+    pub interest_first: bool,
     /// Maximum rows (defaults to [`DEFAULT_QUERY_LIMIT`]).
     pub limit: Option<i64>,
 }
@@ -130,6 +142,16 @@ impl TrafficQuery {
     /// Restrict to exchanges started at or before `to`.
     pub fn to(mut self, to: DateTime<Utc>) -> Self {
         self.to = Some(to);
+        self
+    }
+    /// Restrict to exchanges carrying the auto-flag `flag` (e.g. [`Flag::label`]).
+    pub fn by_flag(mut self, flag: impl Into<String>) -> Self {
+        self.flag = Some(flag.into());
+        self
+    }
+    /// Surface highest-interest exchanges first (the triage ordering).
+    pub fn interest_first(mut self) -> Self {
+        self.interest_first = true;
         self
     }
 }
@@ -181,6 +203,28 @@ impl TrafficStore {
             .await
             .map_err(|e| Error::Store(format!("failed to initialise traffic store: {e}")))?;
 
+        // A store captured by f01 (pre-analysis) lacks the analysis columns; add them
+        // idempotently so an existing DB upgrades in place. A fresh table already has
+        // them from SCHEMA, so tolerate the "duplicate column" error. The score index
+        // is created here (not in SCHEMA) so it never precedes the column on an
+        // upgraded DB.
+        for stmt in [
+            "ALTER TABLE exchanges ADD COLUMN flags_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE exchanges ADD COLUMN score INTEGER NOT NULL DEFAULT 0",
+        ] {
+            if let Err(e) = sqlx::query(stmt).execute(&pool).await
+                && !e.to_string().contains("duplicate column")
+            {
+                return Err(Error::Store(format!(
+                    "failed to migrate traffic store: {e}"
+                )));
+            }
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_exchanges_score ON exchanges(score)")
+            .execute(&pool)
+            .await
+            .map_err(|e| Error::Store(format!("failed to index traffic store: {e}")))?;
+
         Ok(Self { pool })
     }
 
@@ -202,18 +246,24 @@ impl TrafficStore {
         CaptureSink { tx }
     }
 
-    /// Persist one exchange, returning its assigned row id.
+    /// Persist one exchange, returning its assigned row id. The exchange is analysed
+    /// (auto-flagged + scored) here, in the async writer — off the relay's hot path —
+    /// and its flags/score are stored with the row so the triage view is queryable
+    /// and stable across restarts.
     pub async fn record(&self, ex: &CapturedExchange) -> Result<i64> {
         let params_json = serde_json::to_string(&ex.params).map_err(store_err)?;
         let req_headers_json = headers_to_json(&ex.req_headers).map_err(store_err)?;
         let resp_headers_json = headers_to_json(&ex.resp_headers).map_err(store_err)?;
 
+        let analysis = analyze(ex);
+        let flags_json = flags_to_json(&analysis.flags).map_err(store_err)?;
+
         let result = sqlx::query(
             "INSERT INTO exchanges \
                (method, url, host, endpoint, query, params_json, req_headers_json, \
                 req_body, req_body_truncated, status, resp_headers_json, resp_body, \
-                resp_body_truncated, started_at, duration_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                resp_body_truncated, started_at, duration_ms, flags_json, score) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&ex.method)
         .bind(&ex.url)
@@ -230,6 +280,8 @@ impl TrafficStore {
         .bind(ex.resp_body_truncated)
         .bind(ex.started_at)
         .bind(ex.duration_ms)
+        .bind(flags_json)
+        .bind(analysis.score)
         .execute(&self.pool)
         .await
         .map_err(store_err)?;
@@ -243,7 +295,7 @@ impl TrafficStore {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
             "SELECT id, method, url, host, endpoint, query, params_json, req_headers_json, \
                     req_body, req_body_truncated, status, resp_headers_json, resp_body, \
-                    resp_body_truncated, started_at, duration_ms \
+                    resp_body_truncated, started_at, duration_ms, flags_json, score \
              FROM exchanges WHERE 1 = 1",
         );
 
@@ -277,8 +329,19 @@ impl TrafficStore {
             .push_bind(header.to_ascii_lowercase())
             .push(")");
         }
+        if let Some(flag) = &q.flag {
+            // Flag labels live in a JSON array; match presence via json_each.
+            qb.push(" AND EXISTS (SELECT 1 FROM json_each(flags_json) WHERE json_each.value = ")
+                .push_bind(flag.clone())
+                .push(")");
+        }
 
-        qb.push(" ORDER BY id DESC LIMIT ");
+        // Triage view surfaces highest-interest first; default is newest first.
+        if q.interest_first {
+            qb.push(" ORDER BY score DESC, id DESC LIMIT ");
+        } else {
+            qb.push(" ORDER BY id DESC LIMIT ");
+        }
         qb.push_bind(resolve_limit(q.limit));
 
         let rows = qb.build().fetch_all(&self.pool).await.map_err(store_err)?;
@@ -344,7 +407,9 @@ CREATE TABLE IF NOT EXISTS exchanges (
     resp_body           BLOB,
     resp_body_truncated INTEGER NOT NULL DEFAULT 0,
     started_at          TEXT    NOT NULL,
-    duration_ms         INTEGER NOT NULL
+    duration_ms         INTEGER NOT NULL,
+    flags_json          TEXT    NOT NULL DEFAULT '[]',
+    score               INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_exchanges_endpoint   ON exchanges(endpoint);
 CREATE INDEX IF NOT EXISTS idx_exchanges_host       ON exchanges(host);
@@ -364,6 +429,19 @@ fn headers_to_json(headers: &[(String, String)]) -> serde_json::Result<String> {
         .map(|(k, v)| (k.to_ascii_lowercase(), serde_json::Value::String(v.clone())))
         .collect();
     serde_json::to_string(&map)
+}
+
+/// Serialize the auto-flags to a JSON array of their stable string labels.
+fn flags_to_json(flags: &[Flag]) -> serde_json::Result<String> {
+    let labels: Vec<&str> = flags.iter().map(|f| f.label()).collect();
+    serde_json::to_string(&labels)
+}
+
+/// Reconstruct the auto-flags from a stored JSON array of labels; unknown labels
+/// (e.g. from a newer writer) are skipped rather than failing the whole row.
+fn flags_from_json(text: &str) -> Result<Vec<Flag>> {
+    let labels: Vec<String> = serde_json::from_str(text).map_err(store_err)?;
+    Ok(labels.iter().filter_map(|l| Flag::from_label(l)).collect())
 }
 
 /// Reconstruct the header pairs from a stored JSON object.
@@ -421,7 +499,14 @@ fn row_to_exchange(row: &sqlx::sqlite::SqliteRow) -> Result<StoredExchange> {
         started_at: row.try_get("started_at").map_err(store_err)?,
         duration_ms: row.try_get("duration_ms").map_err(store_err)?,
     };
-    Ok(StoredExchange { id, exchange })
+    let flags = flags_from_json(&row.try_get::<String, _>("flags_json").map_err(store_err)?)?;
+    let score: i64 = row.try_get("score").map_err(store_err)?;
+    Ok(StoredExchange {
+        id,
+        exchange,
+        flags,
+        score,
+    })
 }
 
 /// Restrict `path` to owner-only access on Unix (a no-op elsewhere). Used to keep
@@ -618,6 +703,70 @@ mod tests {
             sink.capture(sample(&format!("/e{i}"), 200, &[], &[]));
         }
         // If capture had blocked, this test would hang rather than complete.
+    }
+
+    #[tokio::test]
+    async fn analysis_is_persisted_queryable_and_ranks_the_triage_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("traffic.db");
+        let store = TrafficStore::open(&path).await.unwrap();
+
+        // An interesting exchange: auth token + numeric id param on an API path.
+        store
+            .record(&sample(
+                "/api/users",
+                200,
+                &["id"],
+                &[("Authorization", "Bearer secret")],
+            ))
+            .await
+            .unwrap();
+        // A plain static asset (non-JSON response set below) — no categories.
+        let mut asset = sample("/static/app.js", 200, &[], &[]);
+        asset.resp_headers = vec![("content-type".into(), "application/javascript".into())];
+        store.record(&asset).await.unwrap();
+        // A server error.
+        store
+            .record(&sample("/broken", 500, &[], &[]))
+            .await
+            .unwrap();
+
+        // Reopen to prove flags/score survive a restart.
+        store.close().await;
+        let store = TrafficStore::open(&path).await.unwrap();
+
+        // The interesting exchange is flagged in both categories and scores > 0.
+        let hot = store
+            .query(&TrafficQuery::new().by_endpoint("/api/users"))
+            .await
+            .unwrap();
+        assert!(hot[0].flags.contains(&Flag::Auth));
+        assert!(hot[0].flags.contains(&Flag::Idor));
+
+        // The static asset carries no flags and scores zero.
+        let cold = store
+            .query(&TrafficQuery::new().by_endpoint("/static/app.js"))
+            .await
+            .unwrap();
+        assert!(cold[0].flags.is_empty());
+        assert_eq!(cold[0].score, 0);
+        assert!(hot[0].score > cold[0].score);
+
+        // The error response is flagged and queryable by flag.
+        let errors = store
+            .query(&TrafficQuery::new().by_flag(Flag::Error.label()))
+            .await
+            .unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].exchange.endpoint, "/broken");
+
+        // The triage view surfaces the highest-interest exchange first.
+        let triage = store
+            .query(&TrafficQuery::new().interest_first())
+            .await
+            .unwrap();
+        assert_eq!(triage[0].exchange.endpoint, "/api/users");
+        assert_eq!(triage.last().unwrap().exchange.endpoint, "/static/app.js");
     }
 
     /// The DB (captured credentials) is owner-only, and its parent directory is too,
