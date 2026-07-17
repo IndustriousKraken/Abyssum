@@ -531,6 +531,30 @@ mod tests {
     }
 
     #[test]
+    fn subdomain_bruteforce_defaults_off() {
+        // Conservative-by-default: active brute-force is opt-in, so the default
+        // must be off. A regression flipping this weakens the stealth posture.
+        assert!(!Config::default().scanning.subdomain_bruteforce);
+    }
+
+    #[test]
+    fn subdomain_bruteforce_parses_from_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "scanning:\n  subdomain_bruteforce: true\n").unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert!(cfg.scanning.subdomain_bruteforce);
+    }
+
+    #[test]
+    fn subdomain_bruteforce_env_override() {
+        let env = env_of(&[("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", "true")]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert!(cfg.scanning.subdomain_bruteforce);
+    }
+
+    #[test]
     fn auth_session_lifetimes_default_and_override() {
         // Conservative defaults: a session cannot outlive a day, and an idle one
         // lapses after an hour.

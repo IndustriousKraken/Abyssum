@@ -363,7 +363,9 @@ impl BaseScanner for SubdomainReconScanner {
                 apex = %apex,
                 cap = MAX_CANDIDATES,
                 dropped,
-                "passive source returned more candidates than the probe cap; \
+                // The capped set is the union of passive and (when enabled)
+                // brute-force candidates, so the message stays source-neutral.
+                "candidate set exceeded the probe cap; \
                  probing the first {MAX_CANDIDATES} and dropping {dropped}"
             );
         }
@@ -440,7 +442,14 @@ struct ProbeResponse {
 /// matches an unclaimed-service fingerprint, otherwise an informational
 /// live-subdomain finding.
 fn finding_for(target: &Target, host: &str, url: &Url, response: &ProbeResponse) -> Finding {
-    match match_takeover(&response.body) {
+    // The unclaimed-service fingerprints are error pages the fronting service
+    // serves with a 4xx/5xx status; gating on an error status keeps a legitimate
+    // 2xx page that merely contains one of these phrases (e.g. an article about a
+    // "repository not found" error) from being mis-flagged as a takeover.
+    let takeover = (response.status >= 400)
+        .then(|| match_takeover(&response.body))
+        .flatten();
+    match takeover {
         Some(service) => Finding::builder(
             ID,
             target.clone(),
@@ -835,6 +844,21 @@ mod tests {
         assert_eq!(evidence["suspected_service"], "Amazon S3");
         assert_eq!(evidence["takeover"], true);
         assert_eq!(evidence["status"], 404);
+    }
+
+    #[test]
+    fn takeover_marker_on_a_2xx_page_is_not_flagged() {
+        // A legitimate 200 page that merely contains a fingerprint phrase must not
+        // be reported as a takeover — the status gate keeps it an info finding.
+        let url = Url::parse("https://blog.example.com/").unwrap();
+        let response = resp(
+            200,
+            "<html><body>How we fixed our 'repository not found' error</body></html>",
+        );
+        let finding = finding_for(&target(), "blog.example.com", &url, &response);
+        assert_eq!(finding.status, Status::Info);
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(finding.evidence.unwrap()["takeover"], false);
     }
 
     #[test]
