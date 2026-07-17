@@ -230,6 +230,7 @@ async fn read_api_queries_exports_and_replays_over_the_wire() {
     let state = Arc::new(ApiState {
         store: store.clone(),
         replayer,
+        token: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = listener.local_addr().unwrap();
@@ -288,4 +289,54 @@ async fn read_api_queries_exports_and_replays_over_the_wire() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn read_api_rejects_requests_without_the_configured_bearer_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TrafficStore::open(dir.path().join("traffic.db"))
+        .await
+        .unwrap();
+    seed_exchange(&store, "GET", "http://127.0.0.1/api/x", "/api/x").await;
+
+    // Gate the API behind a shared-secret token.
+    let replayer = replayer_with_floor(store.clone(), Duration::ZERO);
+    let state = Arc::new(ApiState {
+        store: store.clone(),
+        replayer,
+        token: Some("s3cret".into()),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = listener.local_addr().unwrap();
+    tokio::spawn(async move { abyssum_proxy::api::serve(listener, state).await });
+
+    let client = reqwest::Client::new();
+
+    // No token → 401, and the captured credentials are not disclosed.
+    let unauth = client
+        .get(format!("http://{api}/exchanges"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Wrong token → 401.
+    let wrong = client
+        .get(format!("http://{api}/exchanges"))
+        .bearer_auth("nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Correct token → 200 with the captured exchange.
+    let ok = client
+        .get(format!("http://{api}/exchanges"))
+        .bearer_auth("s3cret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    let rows: Value = ok.json().await.unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
 }

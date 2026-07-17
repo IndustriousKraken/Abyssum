@@ -22,9 +22,18 @@ struct Args {
     listen: SocketAddr,
 
     /// If set, also serve the read-only traffic API (query/export/replay) on this
-    /// address, so external tools and agents can consume the capture.
+    /// address, so external tools and agents can consume the capture. SECURITY: the
+    /// API can read and replay captured credentials (`Authorization`/`Cookie`
+    /// headers); gate it with --api-token, which is REQUIRED for a non-loopback bind.
     #[arg(long, value_name = "ADDR")]
     api_listen: Option<SocketAddr>,
+
+    /// Shared-secret bearer token required on every traffic-API request (sent as
+    /// `Authorization: Bearer <token>`). REQUIRED to bind --api-listen to a
+    /// non-loopback address, since the API can read/replay captured credentials.
+    /// May be passed via the ABYSSUM_PROXY_API_TOKEN env var to keep it out of argv.
+    #[arg(long, value_name = "TOKEN", env = "ABYSSUM_PROXY_API_TOKEN")]
+    api_token: Option<String>,
 
     /// Path to the SQLite traffic store.
     #[arg(long, value_name = "PATH", default_value = "data/proxy-traffic.db")]
@@ -71,6 +80,7 @@ async fn main() -> ExitCode {
         capture_capacity: args.capture_capacity,
         insecure_upstream: args.insecure_upstream,
         api_listen: args.api_listen,
+        api_token: args.api_token,
     };
 
     match run(config).await {

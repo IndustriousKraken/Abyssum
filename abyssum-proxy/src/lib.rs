@@ -61,6 +61,11 @@ pub struct ProxyConfig {
     /// If set, also serve the read-only traffic API (query/export/replay) on this
     /// address, so external tools and agents can consume the capture. Off by default.
     pub api_listen: Option<SocketAddr>,
+    /// Shared-secret bearer token gating the traffic API. When set, every API
+    /// request must carry `Authorization: Bearer <token>`. REQUIRED to bind
+    /// [`api_listen`](Self::api_listen) to a non-loopback address, because the API
+    /// can read and replay captured credentials (`Authorization`/`Cookie` headers).
+    pub api_token: Option<String>,
 }
 
 impl Default for ProxyConfig {
@@ -73,6 +78,7 @@ impl Default for ProxyConfig {
             capture_capacity: 1024,
             insecure_upstream: false,
             api_listen: None,
+            api_token: None,
         }
     }
 }
@@ -110,8 +116,22 @@ pub async fn run(config: ProxyConfig) -> Result<()> {
     // tools and agents can consume the capture. Replay goes out through the paced
     // send path, so it respects the same pacing floor and UA rotation as a scan.
     if let Some(api_addr) = config.api_listen {
+        // The API can read and replay captured credentials (`Authorization`/`Cookie`
+        // live in the store), so refuse to expose it on a non-loopback address unless
+        // it is gated by a shared-secret token — otherwise anyone who can reach it
+        // could exfiltrate those credentials. Loopback with no token stays allowed.
+        if !api_addr.ip().is_loopback() && config.api_token.is_none() {
+            return Err(Error::Config(format!(
+                "refusing to bind the traffic API to non-loopback {api_addr} without \
+                 --api-token: it exposes captured credentials to anyone who can reach it"
+            )));
+        }
         let replayer = build_replayer(store.clone(), config.body_limit);
-        let state = Arc::new(ApiState { store, replayer });
+        let state = Arc::new(ApiState {
+            store,
+            replayer,
+            token: config.api_token.clone(),
+        });
         let api_listener = TcpListener::bind(api_addr).await?;
         let local_api = api_listener.local_addr()?;
         tracing::info!(listen = %local_api, "observing-proxy read/replay API listening");

@@ -16,6 +16,9 @@ pub enum Error {
     /// The outbound leg to the real destination, or the inbound connection.
     #[error("relay error: {0}")]
     Upstream(String),
+    /// Invalid runtime configuration (e.g. exposing the read/replay API unsafely).
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 /// The proxy's `Result` alias.

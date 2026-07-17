@@ -14,6 +14,14 @@
 //! `<filters>` are the same dimensions the store indexes: `endpoint`, `host`,
 //! `status`, `param`, `header`, `flag`, `from`/`to` (RFC 3339), `limit`, and
 //! `interest_first`.
+//!
+//! **Security.** This API can read *and* replay captured credentials: `/exchanges`
+//! returns the stored `Authorization`/`Cookie` request headers verbatim, and
+//! `/replay` can re-issue a captured authenticated request to an operator-supplied
+//! URL. It is therefore a credential-exfiltration surface as soon as it is
+//! network-reachable. When [`ApiState::token`] is set, every request must carry a
+//! matching `Authorization: Bearer <token>`; [`run`](crate::run) additionally
+//! refuses to bind a non-loopback address without a token.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -45,6 +53,9 @@ pub struct ApiState {
     pub store: TrafficStore,
     /// The paced replayer.
     pub replayer: Replayer,
+    /// Shared-secret bearer token required on every request. `None` leaves the API
+    /// unauthenticated (only sound on a loopback bind — see the module docs).
+    pub token: Option<String>,
 }
 
 /// Accept connections on `listener` forever, serving the read/replay API on each.
@@ -68,6 +79,14 @@ pub async fn serve(listener: TcpListener, state: Arc<ApiState>) -> Result<()> {
 
 /// Route one API request. Never returns `Err` — failures become status responses.
 pub async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<ApiBody> {
+    // Gate every route (read, export, replay) behind the shared-secret token when one
+    // is configured — the API otherwise exposes captured credentials to any caller.
+    if let Some(expected) = state.token.as_deref()
+        && !authorized(&req, expected)
+    {
+        return error_response(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
+    }
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let raw_query = req.uri().query().map(str::to_string);
@@ -95,6 +114,24 @@ pub async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<Ap
         (&Method::POST, "/replay") => replay(state, req).await,
         _ => error_response(StatusCode::NOT_FOUND, "not found"),
     }
+}
+
+/// Whether the request carries `Authorization: Bearer <token>` matching `expected`.
+/// The token is compared in constant time so a wrong guess leaks no length/prefix.
+fn authorized(req: &Request<Incoming>, expected: &str) -> bool {
+    req.headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|got| constant_time_eq(got.as_bytes(), expected.as_bytes()))
+}
+
+/// Length-checked, early-exit-free byte equality — no short-circuit on first mismatch.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Run the store query described by the request's query string.
@@ -284,5 +321,13 @@ mod tests {
         assert!(is_truthy("")); // bare `?interest_first` present
         assert!(!is_truthy("false"));
         assert!(!is_truthy("0"));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_bytes() {
+        assert!(constant_time_eq(b"s3cret", b"s3cret"));
+        assert!(!constant_time_eq(b"s3cret", b"s3creT")); // same length, one byte off
+        assert!(!constant_time_eq(b"s3cret", b"s3cre")); // differing length
+        assert!(constant_time_eq(b"", b""));
     }
 }
