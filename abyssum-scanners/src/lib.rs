@@ -16,12 +16,15 @@
 //! introspection / query-depth / batching / disclosure checks);
 //! [`subdomain_recon`] is the seventh (passive subdomain discovery plus
 //! subdomain-takeover detection); [`origin_discovery`] is the eighth (finding the
-//! true origin IP of a CDN/WAF-fronted host from passive sources and confirming it).
+//! true origin IP of a CDN/WAF-fronted host from passive sources and confirming it);
+//! [`asn_enumeration`] is the ninth (mapping a target to its owning organization's
+//! ASN and registered netblocks from registration-data sources).
 //!
 //! Register a scanner against a [`ScannerRegistry`](abyssum_core::ScannerRegistry)
 //! with its module's `register` helper; [`register_builtins`] wires up every
 //! scanner this crate ships.
 
+pub mod asn_enumeration;
 pub mod bac;
 pub mod cors;
 pub mod graphql;
@@ -31,6 +34,7 @@ pub mod origin_discovery;
 pub mod rest_discovery;
 pub mod subdomain_recon;
 
+pub use asn_enumeration::AsnEnumerationScanner;
 pub use bac::BacScanner;
 pub use cors::CorsScanner;
 pub use graphql::GraphqlScanner;
@@ -64,4 +68,7 @@ pub fn register_builtins(registry: &mut ScannerRegistry, store: &ReferenceStore)
     // The origin-discovery scanner's passive sources and CDN fingerprints are
     // inline, so it reads no seeded store.
     origin_discovery::register(registry);
+    // The ASN-enumeration scanner's registration-data source and DoH resolver are
+    // inline defaults, so it reads no seeded store.
+    asn_enumeration::register(registry);
 }
