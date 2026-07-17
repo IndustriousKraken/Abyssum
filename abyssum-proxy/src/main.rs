@@ -21,6 +21,11 @@ struct Args {
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
 
+    /// If set, also serve the read-only traffic API (query/export/replay) on this
+    /// address, so external tools and agents can consume the capture.
+    #[arg(long, value_name = "ADDR")]
+    api_listen: Option<SocketAddr>,
+
     /// Path to the SQLite traffic store.
     #[arg(long, value_name = "PATH", default_value = "data/proxy-traffic.db")]
     store: PathBuf,
@@ -65,6 +70,7 @@ async fn main() -> ExitCode {
         body_limit: args.body_limit,
         capture_capacity: args.capture_capacity,
         insecure_upstream: args.insecure_upstream,
+        api_listen: args.api_listen,
     };
 
     match run(config).await {

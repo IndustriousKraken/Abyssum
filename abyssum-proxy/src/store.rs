@@ -289,15 +289,25 @@ impl TrafficStore {
         Ok(result.last_insert_rowid())
     }
 
+    /// Fetch a single stored exchange by its row id (used by replay, which loads the
+    /// captured request to re-issue, and by the read API's by-id lookup).
+    pub async fn get(&self, id: i64) -> Result<Option<StoredExchange>> {
+        let row = sqlx::query(&format!(
+            "SELECT {EXCHANGE_COLUMNS} FROM exchanges WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_err)?;
+        row.as_ref().map(row_to_exchange).transpose()
+    }
+
     /// Query stored exchanges by any subset of the [`TrafficQuery`] dimensions,
     /// newest first, capped at the query's limit (default [`DEFAULT_QUERY_LIMIT`]).
     pub async fn query(&self, q: &TrafficQuery) -> Result<Vec<StoredExchange>> {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "SELECT id, method, url, host, endpoint, query, params_json, req_headers_json, \
-                    req_body, req_body_truncated, status, resp_headers_json, resp_body, \
-                    resp_body_truncated, started_at, duration_ms, flags_json, score \
-             FROM exchanges WHERE 1 = 1",
-        );
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(format!(
+            "SELECT {EXCHANGE_COLUMNS} FROM exchanges WHERE 1 = 1"
+        ));
 
         if let Some(endpoint) = &q.endpoint {
             qb.push(" AND endpoint = ").push_bind(endpoint.clone());
@@ -387,6 +397,13 @@ impl CaptureSink {
         }
     }
 }
+
+/// The column list projected by [`TrafficStore::query`] and [`TrafficStore::get`],
+/// in the order [`row_to_exchange`] reads them. Kept in one place so the two read
+/// paths cannot drift.
+const EXCHANGE_COLUMNS: &str = "id, method, url, host, endpoint, query, params_json, \
+    req_headers_json, req_body, req_body_truncated, status, resp_headers_json, resp_body, \
+    resp_body_truncated, started_at, duration_ms, flags_json, score";
 
 /// The full schema — one indexed table. `params_json` is a JSON array of parameter
 /// names; `*_headers_json` are JSON objects keyed by lowercased header name.

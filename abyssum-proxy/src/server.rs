@@ -335,7 +335,7 @@ fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 
 /// The distinct query-parameter names in `query`, in first-seen order.
-fn param_names(query: Option<&str>) -> Vec<String> {
+pub(crate) fn param_names(query: Option<&str>) -> Vec<String> {
     let Some(query) = query else {
         return Vec::new();
     };
@@ -354,7 +354,7 @@ fn param_names(query: Option<&str>) -> Vec<String> {
 
 /// Truncate `bytes` to `limit` for capture, reporting whether truncation happened.
 /// A `limit` of `0` means "keep everything".
-fn cap(bytes: &Bytes, limit: usize) -> (Vec<u8>, bool) {
+pub(crate) fn cap(bytes: &Bytes, limit: usize) -> (Vec<u8>, bool) {
     if limit == 0 || bytes.len() <= limit {
         (bytes.to_vec(), false)
     } else {

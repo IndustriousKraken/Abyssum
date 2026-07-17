@@ -16,11 +16,17 @@ name = "abyssum-proxy"
 path = "src/main.rs"
 
 [dependencies]
+# Replay reuses the engine's single outbound chokepoint (`ScanContext::send`) so a
+# replayed request honors the same pacing floor and User-Agent rotation as a scan —
+# rather than reimplementing (and risking undercutting) that stealth machinery here.
+abyssum-core = { workspace = true }
 tokio = { workspace = true }
 # Outbound leg: the proxy relays to the real destination through reqwest (rustls,
 # ring), reusing the workspace client. Redirects are NOT followed so the client
 # observes them unmodified.
 reqwest = { workspace = true }
+# URL parsing for replay targets and percent-decoding the read API's query filters.
+url = { workspace = true }
 # Dedicated traffic store — its own SQLite DB, separate from the scan result store.
 sqlx = { workspace = true }
 tracing = { workspace = true }
