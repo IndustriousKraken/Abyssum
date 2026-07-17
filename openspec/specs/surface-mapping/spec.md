@@ -112,3 +112,54 @@ through the paced request path.
 - **WHEN** origin discovery evaluates it
 - **THEN** it SHALL NOT be reported as the origin
 
+### Requirement: Enumerate ASN And Netblocks
+The system SHALL, given a target domain or IP, enumerate the autonomous system number
+(ASN) and the IP netblocks associated with the owning organization using registration-
+data sources such as RDAP or WHOIS, and SHALL report the discovered ASN and netblocks.
+The system SHALL perform enumeration only: it SHALL NOT manipulate routing or perform any
+BGP action. All source queries SHALL pass through the paced request path.
+
+#### Scenario: ASN and netblocks are enumerated
+- **GIVEN** a target domain or IP whose owner has a registered ASN and netblocks
+- **WHEN** enumeration runs
+- **THEN** the ASN and its associated netblocks SHALL be reported, naming the owning organization
+
+#### Scenario: Enumeration performs no routing action
+- **GIVEN** an enumeration run
+- **WHEN** it queries registration-data sources
+- **THEN** it SHALL NOT manipulate routing or perform any BGP action
+
+#### Scenario: Source queries are paced
+- **GIVEN** enumeration queries a registration-data source
+- **WHEN** the query is issued
+- **THEN** it SHALL pass through the paced request path subject to the pacing floor and User-Agent rotation
+
+### Requirement: Discover Exposed Cloud Storage Assets
+The system SHALL discover candidate cloud-storage assets for a target by generating
+candidate names from the target's domain and organization identifiers and probing known
+cloud-provider storage endpoints, and SHALL report assets that exist — reporting those
+that are publicly readable or listable at high severity as a data-exposure finding. A
+candidate that does not exist SHALL NOT be reported. The system SHALL confirm existence
+and exposure only, and SHALL NOT download or enumerate asset contents beyond what is
+needed to confirm exposure. All probing SHALL pass through the paced request path.
+
+#### Scenario: A publicly listable asset is reported at high severity
+- **GIVEN** a candidate that resolves to an existing, publicly readable/listable storage asset
+- **WHEN** cloud-asset discovery probes it
+- **THEN** it SHALL be reported as a high-severity data-exposure finding
+
+#### Scenario: An existing but access-denied asset is reported as footprint
+- **GIVEN** a candidate that exists but returns access-denied
+- **WHEN** cloud-asset discovery probes it
+- **THEN** it SHALL be reported as an informational finding recording the asset
+
+#### Scenario: A non-existent candidate is not reported
+- **GIVEN** a candidate that does not correspond to any asset
+- **WHEN** cloud-asset discovery probes it
+- **THEN** it SHALL NOT be reported
+
+#### Scenario: Exposure is confirmed without exfiltration
+- **GIVEN** a publicly readable asset
+- **WHEN** the system confirms its exposure
+- **THEN** it SHALL NOT download or enumerate the asset's contents beyond what confirms the exposure
+

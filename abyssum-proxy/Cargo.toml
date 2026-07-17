@@ -1,0 +1,50 @@
+[package]
+name = "abyssum-proxy"
+description = "Abyssum observing proxy: a non-blocking pass-through proxy that relays HTTP/HTTPS (TLS-terminating with a locally-generated CA) and captures every exchange into a dedicated, queryable SQLite traffic store."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "abyssum_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abyssum-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+# Outbound leg: the proxy relays to the real destination through reqwest (rustls,
+# ring), reusing the workspace client. Redirects are NOT followed so the client
+# observes them unmodified.
+reqwest = { workspace = true }
+# Dedicated traffic store — its own SQLite DB, separate from the scan result store.
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+
+# Inbound leg: a minimal hyper 1.x http1 server per connection. `http`/`bytes` are
+# the shared wire types (same versions reqwest uses, so headers pass through
+# without conversion). default-features off keeps the crypto provider on `ring`
+# (aws-lc-rs is not available offline).
+http = "1"
+bytes = "1"
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# TLS termination for observation: generate a local CA and per-host leaf certs so
+# HTTPS request/response content is observable (not an intercepting proxy).
+rcgen = "0.14"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

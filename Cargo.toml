@@ -5,6 +5,7 @@ members = [
     "abyssum-scanners",
     "abyssum-web",
     "abyssum-cli",
+    "abyssum-proxy",
 ]
 
 [workspace.package]
