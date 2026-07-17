@@ -88,6 +88,11 @@ pub struct ScanningConfig {
     /// (every outbound request may present a fresh realistic identity); per-scan
     /// pins one identity for the duration of a scan. See `add-seed-data`.
     pub user_agent_rotation: UserAgentRotation,
+    /// Whether the subdomain-recon scanner may perform active DNS brute-force
+    /// (join the seeded wordlist onto the apex and test each candidate for
+    /// existence). Off by default: reconnaissance stays passive unless the operator
+    /// deliberately opts in (conservative-by-default, aggression opt-in).
+    pub subdomain_bruteforce: bool,
 }
 
 /// Granularity of the engine's default User-Agent rotation.
@@ -201,6 +206,7 @@ impl Default for ScanningConfig {
             max_delay: 3.0,
             max_concurrency: 4,
             user_agent_rotation: UserAgentRotation::default(),
+            subdomain_bruteforce: false,
         }
     }
 }
@@ -303,6 +309,10 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION") {
             self.scanning.user_agent_rotation =
                 parse_env("ABYSSUM_SCANNING_USER_AGENT_ROTATION", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE") {
+            self.scanning.subdomain_bruteforce =
+                parse_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS") {
             self.auth.session_absolute_max_hours =
@@ -518,6 +528,30 @@ mod tests {
         let env = env_of(&[("ABYSSUM_SCANNING_USER_AGENT_ROTATION", "hourly")]);
         let err = Config::load_from("/no/such/file.yaml", env).unwrap_err();
         assert!(matches!(err, Error::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn subdomain_bruteforce_defaults_off() {
+        // Conservative-by-default: active brute-force is opt-in, so the default
+        // must be off. A regression flipping this weakens the stealth posture.
+        assert!(!Config::default().scanning.subdomain_bruteforce);
+    }
+
+    #[test]
+    fn subdomain_bruteforce_parses_from_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "scanning:\n  subdomain_bruteforce: true\n").unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert!(cfg.scanning.subdomain_bruteforce);
+    }
+
+    #[test]
+    fn subdomain_bruteforce_env_override() {
+        let env = env_of(&[("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", "true")]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert!(cfg.scanning.subdomain_bruteforce);
     }
 
     #[test]

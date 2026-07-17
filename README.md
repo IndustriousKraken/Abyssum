@@ -143,6 +143,7 @@ scanning:
   max_delay: 3.0               # upper bound of the randomized delay window
   max_concurrency: 4
   user_agent_rotation: per-request   # per-request | per-scan
+  subdomain_bruteforce: false        # opt-in active DNS brute-force in subdomain recon (louder; off by default)
 
 log:
   level: info                  # e.g. debug, or a directive like abyssum_core=debug,info
