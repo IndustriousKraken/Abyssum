@@ -65,10 +65,6 @@ const MAX_CANDIDATES: usize = 64;
 /// comparison only needs a bounded prefix, so bytes beyond this cap are dropped.
 const MAX_BODY_BYTES: usize = 512 * 1024;
 
-/// The whitespace-normalized length tolerance below which two bodies are *not*
-/// considered to differ on length alone (5%) — the same tolerance BAC/IDOR use.
-const LENGTH_TOLERANCE: f64 = 0.05;
-
 /// Known CDN/WAF fingerprints: `(name, lowercase header, lowercase value
 /// substring)`. A response carries the fingerprint when it has the header and —
 /// when the substring is non-empty — the header value contains it (an empty
@@ -177,7 +173,11 @@ impl BaseScanner for OriginDiscoveryScanner {
          from passive historical-DNS sources (never attacking the perimeter), and \
          confirms an origin by requesting the target host directly against a candidate \
          IP and matching the response to the perimeter-served baseline. Only a \
-         confirmed origin is reported, naming the host and IP."
+         confirmed origin is reported, naming the host and IP. Direct-to-IP confirmation \
+         is reliable for HTTP origins; an HTTPS target validates the origin certificate \
+         against the IP literal (which origin certs rarely carry), so an HTTPS origin \
+         cannot be positively confirmed here — for that case the scanner reports an \
+         informational note naming the unconfirmed candidates rather than an empty result."
     }
 
     /// Requires a target with a host (the host whose origin is sought). Any path is
@@ -272,6 +272,20 @@ impl BaseScanner for OriginDiscoveryScanner {
             ctx.report_progress(progress(index + 1, total, ip));
         }
 
+        // HTTPS-to-IP confirmation validates the origin cert against the IP literal
+        // (see confirm_probe), which an origin cert rarely carries, so an HTTPS
+        // target's candidates almost never confirm. When we gathered candidates but
+        // confirmed none over HTTPS, say why instead of returning a silently-empty
+        // result the operator can't interpret.
+        if findings.is_empty() && !candidates.is_empty() && baseline_url.scheme() == "https" {
+            findings.push(https_unconfirmed_finding(
+                target,
+                &host,
+                cdn,
+                candidates.len(),
+            ));
+        }
+
         Ok(findings)
     }
 }
@@ -318,49 +332,35 @@ fn is_confirmed_origin(baseline: &ProbeResponse, candidate: &ProbeResponse) -> b
     detect_cdn(&candidate.headers).is_none() && content_matches(&baseline.body, &candidate.body)
 }
 
-/// Whether two bodies are the same page. The inverse of the BAC/IDOR material-
-/// difference test: bodies whose whitespace-normalized lengths are within
-/// [`LENGTH_TOLERANCE`] and (when both are JSON) whose scalar leaves are equal are
-/// treated as the same content.
+/// Whether two bodies are the same page. When both parse as JSON their sets of
+/// scalar leaf values must be equal; otherwise their whitespace-normalized bodies
+/// must be *identical*, not merely similar in length.
+///
+/// Note the direction: this **confirms** an origin (a match sends the operator to
+/// lock down that IP), so a false "same" is the dangerous case. BAC/IDOR run the
+/// same comparison the other way — there a *difference* is the signal and a false
+/// "same" is harmless — which is why they can accept length-proximity, but here a
+/// same-length yet unrelated page (a parked page, a default nginx page) must not be
+/// read as the origin.
 fn content_matches(baseline: &[u8], candidate: &[u8]) -> bool {
-    !differs_materially(baseline, candidate)
-}
-
-/// Whether two bodies differ *materially*: their whitespace-normalized lengths
-/// differ by more than [`LENGTH_TOLERANCE`], OR (when both parse as JSON) their sets
-/// of scalar leaf values differ. Mirrors the BAC/IDOR comparator.
-//
-// ponytail: replicates idor.rs's private `differs_materially`; lift to a core util
-// only if a third scanner needs the same comparison.
-fn differs_materially(baseline: &[u8], candidate: &[u8]) -> bool {
-    let base_len = normalized_len(baseline);
-    let alt_len = normalized_len(candidate);
-    let max = base_len.max(alt_len);
-    if max > 0 {
-        let diff = base_len.abs_diff(alt_len) as f64 / max as f64;
-        if diff > LENGTH_TOLERANCE {
-            return true;
-        }
-    }
-
     match (
         serde_json::from_slice::<Value>(baseline),
         serde_json::from_slice::<Value>(candidate),
     ) {
-        (Ok(base_json), Ok(alt_json)) => scalar_leaves(&base_json) != scalar_leaves(&alt_json),
-        // Not both JSON and lengths within tolerance: treat as the same page.
-        _ => false,
+        (Ok(base_json), Ok(alt_json)) => scalar_leaves(&base_json) == scalar_leaves(&alt_json),
+        // Not both JSON: require the actual normalized content to match, so a
+        // same-length-different-content page is correctly rejected.
+        _ => normalized(baseline) == normalized(candidate),
     }
 }
 
-/// The whitespace-normalized length of a body: runs of whitespace collapsed to a
+/// The whitespace-normalized form of a body: runs of whitespace collapsed to a
 /// single space and trimmed, so trivial formatting differences do not register.
-fn normalized_len(body: &[u8]) -> usize {
+fn normalized(body: &[u8]) -> String {
     String::from_utf8_lossy(body)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .len()
 }
 
 /// The set of scalar leaf values in a JSON value, each tagged by its key path and
@@ -508,8 +508,11 @@ async fn confirm_probe(
         return Ok(None);
     }
     // ponytail: HTTPS-to-IP validates the cert against the IP, which an origin cert
-    // rarely covers, so an HTTPS origin may not confirm here; a reqwest `.resolve()`
-    // client (SNI = host, connect = IP) would lift that — deferred until needed.
+    // rarely covers, so an HTTPS origin usually will not confirm here; `scan` emits an
+    // informational finding for that case so the result isn't silently empty. Fully
+    // lifting it needs a reqwest `.resolve()` client (SNI = host, connect = IP), which
+    // means teaching the shared paced client per-request connect overrides (a core
+    // change) — deferred until needed.
     let spec = RequestSpec::get(url).header("Host", host);
     probe(ctx, spec).await.map(Some)
 }
@@ -591,6 +594,44 @@ fn finding_for(
          origin cannot be reached directly and the perimeter cannot be bypassed. Rotating \
          the origin IP after locking it down prevents reuse of the exposed address."
     ))
+    .build()
+}
+
+/// Build the informational finding emitted when the target is HTTPS and candidate
+/// origins were gathered but none could be confirmed: a direct HTTPS request to an
+/// IP validates the cert against the IP literal (rarely covered by an origin cert),
+/// so an HTTPS origin cannot be confirmed here. Naming the unconfirmed candidates
+/// keeps an HTTPS scan from returning a silently-empty result with no explanation.
+fn https_unconfirmed_finding(
+    target: &Target,
+    host: &str,
+    cdn: &str,
+    candidate_count: usize,
+) -> Finding {
+    Finding::builder(
+        ID,
+        target.clone(),
+        format!("Origin IP for {host} behind {cdn} could not be confirmed over HTTPS"),
+    )
+    .status(Status::Info)
+    .severity(Severity::Info)
+    .description(format!(
+        "{host} is fronted by {cdn} and {candidate_count} candidate origin IP(s) were \
+         gathered from passive sources, but none could be confirmed: confirming an origin \
+         issues a direct HTTPS request to the candidate IP, and TLS validates the origin \
+         certificate against the IP literal — which an origin certificate rarely carries — \
+         so an HTTPS origin cannot be positively confirmed here. A candidate may still be \
+         the real origin; confirm it manually with the SNI/Host pinned to the hostname \
+         (e.g. `curl --resolve {host}:443:<candidate-ip> https://{host}/`) and compare \
+         the response to the perimeter baseline."
+    ))
+    .evidence(serde_json::json!({
+        "host": host,
+        "fronting_cdn": cdn,
+        "candidate_count": candidate_count,
+        "confirmed": false,
+        "reason": "https_direct_to_ip_cert_validation",
+    }))
     .build()
 }
 
@@ -732,13 +773,29 @@ mod tests {
         let page = "<html><head><title>Acme</title></head><body>Welcome to Acme</body></html>";
         // Byte-identical → match.
         assert!(content_matches(page.as_bytes(), page.as_bytes()));
-        // Trivial whitespace reformatting → still a match.
+        // Trivial whitespace reformatting (collapsed runs, added newlines/tabs
+        // inside existing gaps) → still a match after normalization.
         let reflowed =
-            "<html><head><title>Acme</title></head>\n  <body>Welcome to Acme</body></html>";
+            "<html><head><title>Acme</title></head><body>Welcome    to\tAcme</body></html>";
         assert!(content_matches(page.as_bytes(), reflowed.as_bytes()));
         // A materially different (much longer) page → not a match.
         let other = format!("<html><body>{}</body></html>", "unrelated ".repeat(50));
         assert!(!content_matches(page.as_bytes(), other.as_bytes()));
+    }
+
+    #[test]
+    fn does_not_match_same_length_different_content() {
+        // Two HTML bodies of identical normalized length but different content: a
+        // pure length comparison would call these the same page and confirm the
+        // wrong IP as the origin. Actual-content equality must reject them.
+        let baseline = "<html><body>the real origin site aaaa</body></html>";
+        let unrelated = "<html><body>a parked domain page bbbb</body></html>";
+        assert_eq!(
+            normalized(baseline.as_bytes()).len(),
+            normalized(unrelated.as_bytes()).len(),
+            "test fixtures must be the same normalized length to exercise the path"
+        );
+        assert!(!content_matches(baseline.as_bytes(), unrelated.as_bytes()));
     }
 
     // --- Confirmation rules (tasks 3, 4, and the task-6 scenario) --------------
@@ -808,5 +865,21 @@ mod tests {
         assert_eq!(evidence["origin_ip"], "203.0.113.7");
         assert_eq!(evidence["fronting_cdn"], "Cloudflare");
         assert_eq!(evidence["confirmed"], true);
+    }
+
+    #[test]
+    fn https_unconfirmed_finding_signals_the_https_ceiling() {
+        let finding = https_unconfirmed_finding(&target(), "example.com", "Cloudflare", 3);
+        assert_eq!(finding.scanner_id, "origin_discovery");
+        // An informational signal, not a vulnerability: the origin was not confirmed.
+        assert_eq!(finding.status, Status::Info);
+        assert_eq!(finding.severity, Severity::Info);
+        assert!(finding.title.contains("example.com"));
+        assert!(finding.title.contains("HTTPS"));
+        let evidence = finding.evidence.unwrap();
+        assert_eq!(evidence["host"], "example.com");
+        assert_eq!(evidence["candidate_count"], 3);
+        assert_eq!(evidence["confirmed"], false);
+        assert_eq!(evidence["reason"], "https_direct_to_ip_cert_validation");
     }
 }

@@ -619,6 +619,9 @@ async fn crtsh_query(base: &Url, apex: &str, ctx: &ScanContext) -> Result<Vec<St
 
     let response = match probe(ctx, RequestSpec::get(url)).await {
         Ok(response) => response,
+        // Cancellation is not a source failure: surface it rather than masking a
+        // cancelled scan as 'no candidates' (matches doh_resolves / the probe loop).
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(err) => {
             tracing::warn!(
                 scanner = ID,
