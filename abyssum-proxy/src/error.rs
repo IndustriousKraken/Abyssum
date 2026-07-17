@@ -16,6 +16,17 @@ pub enum Error {
     /// The outbound leg to the real destination, or the inbound connection.
     #[error("relay error: {0}")]
     Upstream(String),
+    /// Invalid runtime configuration (e.g. exposing the read/replay API unsafely).
+    #[error("configuration error: {0}")]
+    Config(String),
+    /// A referenced resource does not exist (e.g. replaying an unknown exchange id).
+    /// The read API maps this to `404`.
+    #[error("{0}")]
+    NotFound(String),
+    /// Caller-supplied input was invalid (e.g. a malformed replay method or URL).
+    /// The read API maps this to `400`.
+    #[error("{0}")]
+    BadRequest(String),
 }
 
 /// The proxy's `Result` alias.

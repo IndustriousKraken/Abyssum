@@ -14,8 +14,12 @@
 //!
 //! [`run`] wires these together from a [`ProxyConfig`] for the binary.
 
+pub mod analysis;
+pub mod api;
 pub mod ca;
 pub mod error;
+pub mod export;
+pub mod replay;
 pub mod server;
 pub mod store;
 
@@ -23,10 +27,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use abyssum_core::{
+    CancellationToken, Config, RateLimiter, RotatingUserAgent, ScanContext, UserAgentRotation,
+};
 use tokio::net::TcpListener;
 
+pub use analysis::{Analysis, Flag, analyze};
+pub use api::ApiState;
 pub use ca::CertAuthority;
 pub use error::{Error, Result};
+pub use export::{ExportFormat, to_har, to_openapi, to_postman, to_raw};
+pub use replay::{ReplayModifications, Replayer};
 pub use server::ProxyServer;
 pub use store::{CaptureSink, CapturedExchange, StoredExchange, TrafficQuery, TrafficStore};
 
@@ -47,6 +58,14 @@ pub struct ProxyConfig {
     pub capture_capacity: usize,
     /// Disable TLS verification on the outbound leg (targets with broken certs).
     pub insecure_upstream: bool,
+    /// If set, also serve the read-only traffic API (query/export/replay) on this
+    /// address, so external tools and agents can consume the capture. Off by default.
+    pub api_listen: Option<SocketAddr>,
+    /// Shared-secret bearer token gating the traffic API. When set, every API
+    /// request must carry `Authorization: Bearer <token>`. REQUIRED to bind
+    /// [`api_listen`](Self::api_listen) to a non-loopback address, because the API
+    /// can read and replay captured credentials (`Authorization`/`Cookie` headers).
+    pub api_token: Option<String>,
 }
 
 impl Default for ProxyConfig {
@@ -58,8 +77,26 @@ impl Default for ProxyConfig {
             body_limit: 64 * 1024,
             capture_capacity: 1024,
             insecure_upstream: false,
+            api_listen: None,
+            api_token: None,
         }
     }
+}
+
+/// Build the paced [`Replayer`] over the traffic store: a [`ScanContext`] carrying
+/// the shared pacing floor (from the default scanning config) and a rotating,
+/// realistic User-Agent pool, so a replayed request respects the same
+/// infrastructure-respect posture as a scan. The UA pool falls back to the bundled
+/// realistic identities when the store is unseeded (see `RotatingUserAgent::new`).
+fn build_replayer(store: TrafficStore, body_limit: usize) -> Replayer {
+    let config = Config::default();
+    let rate_limiter = RateLimiter::from_config(&config.scanning);
+    let ua = Arc::new(RotatingUserAgent::new(
+        Vec::new(),
+        UserAgentRotation::PerRequest,
+    ));
+    let ctx = ScanContext::new(Arc::new(config), rate_limiter, ua, CancellationToken::new());
+    Replayer::new(ctx, store, body_limit)
 }
 
 /// Open the traffic store, spawn its writer, load/create the CA, bind the listener,
@@ -74,6 +111,36 @@ pub async fn run(config: ProxyConfig) -> Result<()> {
         config.body_limit,
         config.insecure_upstream,
     )?);
+
+    // Optionally serve the read-only traffic API (query/export/replay) so external
+    // tools and agents can consume the capture. Replay goes out through the paced
+    // send path, so it respects the same pacing floor and UA rotation as a scan.
+    if let Some(api_addr) = config.api_listen {
+        // The API can read and replay captured credentials (`Authorization`/`Cookie`
+        // live in the store), so refuse to expose it on a non-loopback address unless
+        // it is gated by a shared-secret token — otherwise anyone who can reach it
+        // could exfiltrate those credentials. Loopback with no token stays allowed.
+        if !api_addr.ip().is_loopback() && config.api_token.is_none() {
+            return Err(Error::Config(format!(
+                "refusing to bind the traffic API to non-loopback {api_addr} without \
+                 --api-token: it exposes captured credentials to anyone who can reach it"
+            )));
+        }
+        let replayer = build_replayer(store.clone(), config.body_limit);
+        let state = Arc::new(ApiState {
+            store,
+            replayer,
+            token: config.api_token.clone(),
+        });
+        let api_listener = TcpListener::bind(api_addr).await?;
+        let local_api = api_listener.local_addr()?;
+        tracing::info!(listen = %local_api, "observing-proxy read/replay API listening");
+        tokio::spawn(async move {
+            if let Err(e) = api::serve(api_listener, state).await {
+                tracing::error!(error = %e, "traffic API stopped");
+            }
+        });
+    }
 
     let listener = TcpListener::bind(config.listen).await?;
     let local = listener.local_addr()?;
