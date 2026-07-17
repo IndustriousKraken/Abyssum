@@ -37,7 +37,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::export::ExportFormat;
 use crate::replay::{ReplayModifications, Replayer};
 use crate::store::{StoredExchange, TrafficQuery, TrafficStore};
@@ -98,7 +98,7 @@ pub async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<Ap
                 let body = Value::Array(rows.iter().map(exchange_to_json).collect());
                 json_response(StatusCode::OK, &body)
             }
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            Err(e) => internal_error("querying traffic store", &e),
         },
         (&Method::GET, p) if p.starts_with("/export/") => {
             let Some(format) = ExportFormat::from_name(&p["/export/".len()..]) else {
@@ -108,7 +108,7 @@ pub async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<Ap
                 Ok(rows) => {
                     body_response(StatusCode::OK, format.content_type(), format.export(&rows))
                 }
-                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => internal_error("exporting traffic store", &e),
             }
         }
         (&Method::POST, "/replay") => replay(state, req).await,
@@ -194,7 +194,18 @@ async fn replay(state: Arc<ApiState>, req: Request<Incoming>) -> Response<ApiBod
 
     match state.replayer.replay_stored(id, &mods).await {
         Ok(row) => json_response(StatusCode::OK, &exchange_to_json(&row)),
-        Err(e) => error_response(StatusCode::BAD_GATEWAY, &e.to_string()),
+        // Classify by cause instead of collapsing everything to 502: an unknown id is
+        // 404, malformed operator input (bad method/URL) is 400, a genuine upstream
+        // failure is 502, and anything else (e.g. a store fault) is 500. The 4xx
+        // reasons are the caller's own input, so they're echoed; 5xx detail is logged
+        // rather than returned so upstream/store internals don't leak to the caller.
+        Err(Error::NotFound(msg)) => error_response(StatusCode::NOT_FOUND, &msg),
+        Err(Error::BadRequest(msg)) => error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(e @ Error::Upstream(_)) => {
+            tracing::error!(error = %e, "replay upstream request failed");
+            error_response(StatusCode::BAD_GATEWAY, "upstream request failed")
+        }
+        Err(e) => internal_error("replaying captured request", &e),
     }
 }
 
@@ -269,6 +280,14 @@ fn json_response(status: StatusCode, value: &Value) -> Response<ApiBody> {
 /// A `{"error": msg}` JSON response with the given status.
 fn error_response(status: StatusCode, message: &str) -> Response<ApiBody> {
     json_response(status, &json!({ "error": message }))
+}
+
+/// A `500` that logs the underlying error but returns only a generic message —
+/// SQLite/sqlx strings can carry schema details, file paths, or constraint names,
+/// which must not reach an API caller.
+fn internal_error(context: &str, e: &Error) -> Response<ApiBody> {
+    tracing::error!(error = %e, "{context}");
+    error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
 /// A response carrying a string body with an explicit content type.

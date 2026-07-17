@@ -359,7 +359,7 @@ fn path_template(endpoint: &str) -> (String, Vec<String>) {
     let templated: Vec<String> = endpoint
         .split('/')
         .map(|seg| {
-            if is_ref_segment(seg) {
+            if crate::analysis::is_ref_segment(seg) {
                 let name = if params.is_empty() {
                     "id".to_string()
                 } else {
@@ -373,21 +373,6 @@ fn path_template(endpoint: &str) -> (String, Vec<String>) {
         })
         .collect();
     (templated.join("/"), params)
-}
-
-/// A path segment that looks like an object reference: all-digits or a UUID.
-fn is_ref_segment(seg: &str) -> bool {
-    !seg.is_empty() && (seg.bytes().all(|b| b.is_ascii_digit()) || is_uuid(seg))
-}
-
-/// A canonical 8-4-4-4-12 hex UUID.
-fn is_uuid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == 5
-        && parts
-            .iter()
-            .zip([8usize, 4, 4, 4, 12])
-            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// A JSON example from a body: the parsed JSON when the body is JSON, else the

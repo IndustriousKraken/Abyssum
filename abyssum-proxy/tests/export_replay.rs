@@ -340,3 +340,44 @@ async fn read_api_rejects_requests_without_the_configured_bearer_token() {
     let rows: Value = ok.json().await.unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn replay_maps_failures_to_specific_status_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TrafficStore::open(dir.path().join("traffic.db"))
+        .await
+        .unwrap();
+    // A captured exchange to replay. Its URL is never actually hit here: both replays
+    // below fail (unknown id / bad URL) before any request leaves the process.
+    let id = seed_exchange(&store, "GET", "http://127.0.0.1/api/x", "/api/x").await;
+
+    let replayer = replayer_with_floor(store.clone(), Duration::ZERO);
+    let state = Arc::new(ApiState {
+        store: store.clone(),
+        replayer,
+        token: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = listener.local_addr().unwrap();
+    tokio::spawn(async move { abyssum_proxy::api::serve(listener, state).await });
+
+    let client = reqwest::Client::new();
+
+    // Unknown id → 404, not a blanket 502.
+    let missing = client
+        .post(format!("http://{api}/replay"))
+        .json(&json!({ "id": id + 999 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Malformed operator-supplied URL → 400 (rejected before any request goes out).
+    let bad = client
+        .post(format!("http://{api}/replay"))
+        .json(&json!({ "id": id, "url": "not a url" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
+}

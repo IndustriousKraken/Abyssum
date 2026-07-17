@@ -170,8 +170,10 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
 }
 
-/// A path segment that looks like an object reference: all-digits or a UUID.
-fn is_ref_segment(seg: &str) -> bool {
+/// A path segment that looks like an object reference: all-digits or a UUID. The
+/// single crate-wide definition — the OpenAPI path-templating in [`crate::export`]
+/// reuses it so IDOR analysis and `{id}` collapsing agree on what a reference is.
+pub(crate) fn is_ref_segment(seg: &str) -> bool {
     !seg.is_empty() && (seg.bytes().all(|b| b.is_ascii_digit()) || is_uuid(seg))
 }
 

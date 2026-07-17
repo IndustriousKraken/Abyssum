@@ -203,21 +203,37 @@ impl TrafficStore {
             .await
             .map_err(|e| Error::Store(format!("failed to initialise traffic store: {e}")))?;
 
-        // A store captured by f01 (pre-analysis) lacks the analysis columns; add them
-        // idempotently so an existing DB upgrades in place. A fresh table already has
-        // them from SCHEMA, so tolerate the "duplicate column" error. The score index
-        // is created here (not in SCHEMA) so it never precedes the column on an
+        // A store captured by f01 (pre-analysis) lacks the analysis columns; add any
+        // that are missing so an existing DB upgrades in place. A fresh table already
+        // has them from SCHEMA. We check the live columns (via `PRAGMA table_info`)
+        // rather than running the ALTER and swallowing a "duplicate column" error:
+        // SQLite reports that as a generic SQLITE_ERROR whose only distinguishing
+        // signal is the message text, which is fragile to match on. The score index
+        // is created below (not in SCHEMA) so it never precedes the column on an
         // upgraded DB.
-        for stmt in [
-            "ALTER TABLE exchanges ADD COLUMN flags_json TEXT NOT NULL DEFAULT '[]'",
-            "ALTER TABLE exchanges ADD COLUMN score INTEGER NOT NULL DEFAULT 0",
+        let columns: Vec<String> = sqlx::query("PRAGMA table_info(exchanges)")
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| Error::Store(format!("failed to inspect traffic store: {e}")))?
+            .iter()
+            .map(|row| row.try_get::<String, _>("name"))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(store_err)?;
+        for (name, stmt) in [
+            (
+                "flags_json",
+                "ALTER TABLE exchanges ADD COLUMN flags_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+            (
+                "score",
+                "ALTER TABLE exchanges ADD COLUMN score INTEGER NOT NULL DEFAULT 0",
+            ),
         ] {
-            if let Err(e) = sqlx::query(stmt).execute(&pool).await
-                && !e.to_string().contains("duplicate column")
-            {
-                return Err(Error::Store(format!(
-                    "failed to migrate traffic store: {e}"
-                )));
+            if !columns.iter().any(|c| c == name) {
+                sqlx::query(stmt)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| Error::Store(format!("failed to migrate traffic store: {e}")))?;
             }
         }
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_exchanges_score ON exchanges(score)")

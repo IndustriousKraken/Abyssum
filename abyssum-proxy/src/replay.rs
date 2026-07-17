@@ -67,7 +67,7 @@ impl Replayer {
             .store
             .get(id)
             .await?
-            .ok_or_else(|| Error::Store(format!("no captured exchange with id {id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("no captured exchange with id {id}")))?;
         self.replay(&base.exchange, mods).await
     }
 
@@ -82,11 +82,11 @@ impl Replayer {
         // modifications.
         let method_str = mods.method.as_deref().unwrap_or(&base.method);
         let method = Method::from_bytes(method_str.as_bytes())
-            .map_err(|e| Error::Upstream(format!("invalid replay method {method_str:?}: {e}")))?;
+            .map_err(|e| Error::BadRequest(format!("invalid replay method {method_str:?}: {e}")))?;
 
         let url_str = mods.url.as_deref().unwrap_or(&base.url);
         let url = url::Url::parse(url_str)
-            .map_err(|e| Error::Upstream(format!("invalid replay URL {url_str:?}: {e}")))?;
+            .map_err(|e| Error::BadRequest(format!("invalid replay URL {url_str:?}: {e}")))?;
 
         let source_headers = mods.headers.as_ref().unwrap_or(&base.req_headers);
         let headers: Vec<(String, String)> = source_headers
