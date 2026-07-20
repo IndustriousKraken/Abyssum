@@ -33,7 +33,8 @@ pub fn esc(input: &str) -> String {
 pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
     let nav = match user {
         Some(user) => format!(
-            "<nav><a href=\"/\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
+            "<nav><span class=\"brand\">Abyssum</span>\
+             <a href=\"/\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
              <span class=\"muted\">{name}{admin}</span>\
              <form method=\"post\" action=\"/logout\" style=\"display:inline\">\
@@ -233,7 +234,7 @@ pub fn sessions_table(sessions: &[ScanSession], viewer: &User) -> String {
                  <td>{targets}</td></tr>",
                 id = s.id,
                 short = &s.id.to_string()[..8],
-                status = status_str(s.status),
+                status = status_pill(s.status),
                 completed = s.completed_units,
                 total = s.total_units,
                 findings = s.findings.len(),
@@ -259,7 +260,7 @@ pub fn scan_detail(user: &User, session: &ScanSession) -> String {
     };
     let body = format!(
         "<h1>Scan {short}</h1>\
-         <p>Status: <strong>{status}</strong></p>\
+         <p>Status: {status}</p>\
          {cancel}\
          {live}\
          <h2>Tags</h2>\
@@ -270,7 +271,7 @@ pub fn scan_detail(user: &User, session: &ScanSession) -> String {
          <div id=\"results\" hx-get=\"/scan/{id}/results\" \
            hx-trigger=\"load, refresh\">Loading…</div>",
         short = &id.to_string()[..8],
-        status = status_str(session.status),
+        status = status_pill(session.status),
         cancel = cancel_form(user, session),
     );
     page("Scan detail", Some(user), &body)
@@ -298,11 +299,11 @@ pub fn progress(session: &ScanSession, scanner: Option<&str>) -> String {
     let scanner = scanner.unwrap_or(if terminal { "—" } else { "(starting)" });
     format!(
         "<div data-terminal=\"{terminal}\">\
-         <p>Status: <strong>{status}</strong></p>\
+         <p>Status: {status}</p>\
          <p>Current scanner: <strong>{scanner}</strong></p>\
          <p>Units: {completed} / {total}</p>\
          <p>Findings so far: <strong>{findings}</strong></p></div>",
-        status = status_str(session.status),
+        status = status_pill(session.status),
         scanner = esc(scanner),
         completed = session.completed_units,
         total = session.total_units,
@@ -354,7 +355,7 @@ fn finding_row(f: &Finding, session_id: Option<Uuid>) -> String {
         "<tr><td class=\"sev-{sev}\">{sev}</td><td>{status}</td><td>{scanner}</td>\
          <td>{target}</td><td><strong>{title}</strong>{description}{evidence}{analyze}</td></tr>",
         sev = severity_str(f.severity),
-        status = finding_status_str(f.status),
+        status = finding_status_pill(f.status),
         scanner = esc(&f.scanner_id),
         target = esc(f.target.full_url().as_str()),
         title = esc(&f.title),
@@ -584,6 +585,12 @@ fn status_str(status: SessionStatus) -> &'static str {
     }
 }
 
+/// A session-status pill (`<span class="status status-…">`); CSS colors it by state.
+fn status_pill(status: SessionStatus) -> String {
+    let s = status_str(status);
+    format!("<span class=\"status status-{s}\">{s}</span>")
+}
+
 fn severity_str(severity: Severity) -> &'static str {
     match severity {
         Severity::Info => "info",
@@ -601,4 +608,10 @@ fn finding_status_str(status: abyssum_core::Status) -> &'static str {
         Status::Safe => "safe",
         Status::Info => "info",
     }
+}
+
+/// A finding-status pill (`<span class="status status-…">`); CSS colors it by state.
+fn finding_status_pill(status: abyssum_core::Status) -> String {
+    let s = finding_status_str(status);
+    format!("<span class=\"status status-{s}\">{s}</span>")
 }
