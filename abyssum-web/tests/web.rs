@@ -76,6 +76,43 @@ async fn auth_gate_redirects_pages_rejects_data_and_admits_authenticated() {
     assert!(resp.body.contains("Dashboard"));
 }
 
+// --- Embedded static assets ------------------------------------------------
+
+/// The `/static/*` assets `view.rs` references must all be served (200) from the
+/// binary's embedded copy — no source tree, no `ABYSSUM_WEB_STATIC`, no filesystem
+/// dependency. Regression for the shipped-binary "no CSS/JS" bug.
+#[tokio::test]
+async fn embedded_static_assets_are_served() {
+    let app = TestApp::spawn().await; // built with the embedded (no-override) path
+    let mut client = app.client(); // static assets are public — no auth needed
+
+    let css = client.get("/static/app.css").await;
+    assert_eq!(css.status, 200);
+    assert!(
+        css.header("content-type")
+            .is_some_and(|ct| ct.contains("text/css")),
+        "app.css should be served as CSS, got {:?}",
+        css.header("content-type")
+    );
+    assert!(!css.body.is_empty(), "app.css body must not be empty");
+    assert!(
+        css.header("cache-control")
+            .is_some_and(|cc| cc.contains("max-age")),
+        "embedded assets should carry a Cache-Control, got {:?}",
+        css.header("cache-control")
+    );
+
+    for asset in ["app.js", "htmx.min.js", "alpine.min.js"] {
+        let resp = client.get(&format!("/static/{asset}")).await;
+        assert_eq!(resp.status, 200, "{asset} should be served");
+        assert!(!resp.body.is_empty(), "{asset} body must not be empty");
+    }
+
+    // An unknown asset still 404s (the handler is not a wildcard file server).
+    let missing = client.get("/static/nope.js").await;
+    assert_eq!(missing.status, 404);
+}
+
 // --- Registration + login flow (web-ui register/login scenarios) -----------
 
 #[tokio::test]

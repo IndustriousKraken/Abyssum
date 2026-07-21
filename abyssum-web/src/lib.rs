@@ -13,6 +13,7 @@
 //! - [`ws`] — the live-progress hub and the hand-driven WebSocket upgrade.
 //! - [`view`] — server-rendered HTML and HTMX fragments.
 
+pub mod assets;
 pub mod auth;
 pub mod handlers;
 pub mod state;
