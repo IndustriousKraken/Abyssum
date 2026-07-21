@@ -50,7 +50,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>{title} — Abyssum</title>\
          <link rel=\"stylesheet\" href=\"/static/app.css\">\
-         <!-- ponytail: htmx/alpine are vendored into /static by install.sh (packaging step). -->\
+         <!-- htmx/alpine are vendored in abyssum-web/static and embedded into the binary (see assets.rs). -->\
          <script src=\"/static/htmx.min.js\" defer></script>\
          <script src=\"/static/alpine.min.js\" defer></script>\
          </head><body><header>{nav}</header><main>{body}</main>\

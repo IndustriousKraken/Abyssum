@@ -50,8 +50,8 @@ impl TestApp {
         tweak(&mut config);
 
         let state = AppState::build(config).await.expect("build state");
-        let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
-        let app = build_router(state.clone(), static_dir);
+        // `None` → serve the embedded assets, the same path a shipped binary uses.
+        let app = build_router(state.clone(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

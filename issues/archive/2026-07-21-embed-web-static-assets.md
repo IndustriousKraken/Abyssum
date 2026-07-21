@@ -66,9 +66,9 @@ is preferred — one file to ship, nothing to locate.
 
 ## Tasks
 
-- [ ] Vendor pinned `htmx.min.js` and `alpine.min.js` into `abyssum-web/static/`; record the versions.
-- [ ] Embed `abyssum-web/static/` into the binary and serve it via an embedded-asset handler, replacing the filesystem `ServeDir` for the default (no-override) case.
-- [ ] Keep `ABYSSUM_WEB_STATIC` as an override; remove the `env!("CARGO_MANIFEST_DIR")` fallback so no build-time path leaks into a shipped binary.
-- [ ] Update the `view.rs` comment that claims install.sh vendors htmx/alpine.
-- [ ] Add a test that the embedded assets are served (e.g. `GET /static/app.css` → 200 with a CSS content-type) so a future regression is caught.
-- [ ] Confirm the four referenced assets (`app.css`, `app.js`, `htmx.min.js`, `alpine.min.js`) all resolve in a binary run outside the source tree.
+- [x] Vendor pinned `htmx.min.js` and `alpine.min.js` into `abyssum-web/static/`; record the versions.
+- [x] Embed `abyssum-web/static/` into the binary and serve it via an embedded-asset handler, replacing the filesystem `ServeDir` for the default (no-override) case.
+- [x] Keep `ABYSSUM_WEB_STATIC` as an override; remove the `env!("CARGO_MANIFEST_DIR")` fallback so no build-time path leaks into a shipped binary.
+- [x] Update the `view.rs` comment that claims install.sh vendors htmx/alpine.
+- [x] Add a test that the embedded assets are served (e.g. `GET /static/app.css` → 200 with a CSS content-type) so a future regression is caught.
+- [x] Confirm the four referenced assets (`app.css`, `app.js`, `htmx.min.js`, `alpine.min.js`) all resolve in a binary run outside the source tree.

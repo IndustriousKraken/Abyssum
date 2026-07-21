@@ -8,7 +8,7 @@
 //! static assets.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use abyssum_core::{
@@ -24,6 +24,7 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use tower_http::services::ServeDir;
 
+use crate::assets;
 use crate::auth::{LoginLimiter, require_user_data, require_user_page};
 use crate::handlers;
 use crate::ws::Hub;
@@ -82,7 +83,12 @@ impl AppState {
 /// Build the router: public routes, authenticated page routes (redirect on no
 /// session), authenticated data/WebSocket routes (reject on no session), and the
 /// static asset service. Axum 0.8 path-param syntax is `{name}`.
-pub fn build_router(state: AppState, static_dir: impl AsRef<Path>) -> Router {
+///
+/// `static_dir` selects how `/static/*` is served: `Some(dir)` serves from that
+/// filesystem directory (the `ABYSSUM_WEB_STATIC` override — dev live-reload,
+/// custom themes); `None` serves the assets embedded in the binary (see
+/// [`assets`]), which is the default a shipped binary uses.
+pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     // Pages: a missing session redirects the browser to the login page.
     let page_routes = Router::new()
         .route("/", get(handlers::home))
@@ -143,11 +149,17 @@ pub fn build_router(state: AppState, static_dir: impl AsRef<Path>) -> Router {
             get(handlers::register_page).post(handlers::register_submit),
         );
 
-    Router::new()
+    let router = Router::new()
         .merge(public_routes)
         .merge(page_routes)
-        .merge(data_routes)
-        .nest_service("/static", ServeDir::new(static_dir.as_ref()))
+        .merge(data_routes);
+    // Serve `/static/*` from the override directory when set, else the embedded
+    // copy compiled into the binary.
+    let router = match static_dir {
+        Some(dir) => router.nest_service("/static", ServeDir::new(dir)),
+        None => router.route("/static/{*path}", get(assets::serve)),
+    };
+    router
         .with_state(state)
         // Stamp security headers on every response (pages, fragments, static
         // assets, errors) — wraps the whole router so nothing escapes uncovered.
@@ -193,14 +205,12 @@ async fn security_headers(req: Request, next: Next) -> Response {
     resp
 }
 
-/// Resolve the static-asset directory: `ABYSSUM_WEB_STATIC` if set, else the
-/// `static/` directory beside this crate (dev/test). A shipped binary points this
-/// at the installed asset path via the env var; a missing dir simply 404s.
-pub fn default_static_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ABYSSUM_WEB_STATIC") {
-        return PathBuf::from(dir);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static")
+/// The static-asset override: `Some(dir)` when `ABYSSUM_WEB_STATIC` is set, else
+/// `None` to serve the assets embedded in the binary. No build-time path (e.g.
+/// `CARGO_MANIFEST_DIR`) is baked in — a shipped binary is self-contained, and
+/// the override is only for dev live-reload or custom themes.
+pub fn default_static_dir() -> Option<PathBuf> {
+    std::env::var_os("ABYSSUM_WEB_STATIC").map(PathBuf::from)
 }
 
 /// Build the engine and serve until the process is stopped. Binds the configured
