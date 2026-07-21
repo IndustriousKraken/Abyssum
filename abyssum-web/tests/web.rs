@@ -95,6 +95,12 @@ async fn embedded_static_assets_are_served() {
         css.header("content-type")
     );
     assert!(!css.body.is_empty(), "app.css body must not be empty");
+    assert!(
+        css.header("cache-control")
+            .is_some_and(|cc| cc.contains("max-age")),
+        "embedded assets should carry a Cache-Control, got {:?}",
+        css.header("cache-control")
+    );
 
     for asset in ["app.js", "htmx.min.js", "alpine.min.js"] {
         let resp = client.get(&format!("/static/{asset}")).await;

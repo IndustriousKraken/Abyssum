@@ -34,5 +34,15 @@ pub async fn serve(Path(path): Path<String>) -> Response {
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
+    // ponytail: cache for a day — these bytes only change across releases. Not
+    // `immutable`: the URLs aren't content-hashed, so a browser must revalidate
+    // eventually or a binary update can't invalidate stale app.css/app.js.
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response()
 }

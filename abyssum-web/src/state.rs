@@ -210,7 +210,11 @@ async fn security_headers(req: Request, next: Next) -> Response {
 /// `CARGO_MANIFEST_DIR`) is baked in — a shipped binary is self-contained, and
 /// the override is only for dev live-reload or custom themes.
 pub fn default_static_dir() -> Option<PathBuf> {
-    std::env::var_os("ABYSSUM_WEB_STATIC").map(PathBuf::from)
+    // Reject an empty value: `ABYSSUM_WEB_STATIC=` would otherwise become
+    // `ServeDir::new("")`, silently serving the process CWD.
+    std::env::var_os("ABYSSUM_WEB_STATIC")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Build the engine and serve until the process is stopped. Binds the configured
