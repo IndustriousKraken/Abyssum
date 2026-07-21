@@ -119,6 +119,28 @@ abyssum-web                      # serves on http://127.0.0.1:8000 by default
 The web surface is authenticated (register the first account, which is bootstrapped as
 admin), and shows live scan progress over a WebSocket. Change the bind address in config.
 
+## Multi-user access over the network (HTTPS via Caddy)
+
+`abyssum-web` binds `127.0.0.1` by default — safe, but localhost-only, which makes its
+multi-user accounts pointless unless everyone shares one keyboard. The supported way to
+give a team access is to keep the app on localhost and put a **TLS reverse proxy** in
+front; `abyssum-web` speaks plain HTTP on purpose and leaves TLS to the proxy.
+
+A helper generates a [Caddy](https://caddyserver.com) config with an internal
+(self-signed) CA — ideal for a LAN or VPN with no public DNS:
+
+```sh
+deploy/caddy-setup.sh --site abyssum.lab      # or an IP; add --run to start Caddy now
+```
+
+Caddy terminates HTTPS on `:443` and proxies to `abyssum-web` on `127.0.0.1:8000`; only
+Caddy faces the network. Trust Caddy's root CA on each client (or `caddy trust` locally)
+to avoid browser warnings. Full walkthrough — CA trust for other machines, DNS/hosts,
+systemd — in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
+
+Do **not** instead expose the app directly with `ABYSSUM_SERVER_HOST=0.0.0.0` on an
+untrusted network: that serves the login and session cookies in cleartext.
+
 ## Configuration
 
 Configuration layers in strict precedence: **built-in defaults → YAML file →

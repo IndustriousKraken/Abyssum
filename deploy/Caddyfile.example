@@ -1,0 +1,42 @@
+# Example Caddyfile for serving abyssum-web over HTTPS on a LAN / VPN.
+#
+# Topology:
+#   client ──HTTPS(:443)──▶ Caddy ──HTTP──▶ abyssum-web (127.0.0.1:8000)
+#
+# abyssum-web binds 127.0.0.1 by default and speaks plain HTTP; TLS is Caddy's
+# job. Only Caddy faces the network — the app is never on a routable interface.
+#
+# `tls internal` makes Caddy issue certificates from its OWN root CA (self-signed),
+# so this works with no public DNS and no Let's Encrypt. Trust that root CA on each
+# client (see docs/deploy/CADDY.md) or accept the one-time browser warning.
+#
+# Copy this to /etc/caddy/Caddyfile (edit the hostname), then:
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+# Or generate it automatically with deploy/caddy-setup.sh.
+
+# Replace `abyssum.lab` with the hostname or IP your users will type. A hostname
+# needs to resolve (VPN DNS or /etc/hosts on each client); a bare IP does not.
+https://abyssum.lab {
+    # Forward to the local abyssum-web. Match the port to ABYSSUM_SERVER_PORT
+    # (default 8000).
+    reverse_proxy 127.0.0.1:8000
+
+    # Caddy's internal CA — self-signed, no public DNS/ACME required.
+    tls internal
+
+    # Compression (zstd preferred, gzip fallback).
+    encode zstd gzip
+
+    # Don't advertise the proxy. abyssum-web already sets CSP, HSTS,
+    # X-Frame-Options: DENY, and X-Content-Type-Options: nosniff itself, so
+    # there's nothing else to add at the transport layer.
+    header -Server
+
+    # Optional access log (uncomment to enable; rotate with logrotate or Caddy's
+    # built-in roll_* options).
+    # log {
+    #     output file /var/log/caddy/abyssum-access.log
+    #     format json
+    # }
+}
