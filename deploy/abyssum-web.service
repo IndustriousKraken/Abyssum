@@ -10,7 +10,8 @@
 #
 # EDIT before use:
 #   User=/Group=       the account to run as
-#   WorkingDirectory=  dir holding abyssum.yaml (optional; defaults apply if absent)
+#   WorkingDirectory=  a working dir for the service (config no longer lives here;
+#                      see ABYSSUM_CONFIG below)
 #   ExecStart=         path to the installed abyssum-web binary
 #   ABYSSUM_WEB_STATIC path to a copy of abyssum-web/static/ (see note below)
 #
@@ -33,7 +34,11 @@ Group=abyssum
 WorkingDirectory=/opt/abyssum
 ExecStart=/usr/local/bin/abyssum-web
 
-# --- Runtime config (abyssum.yaml is also read from WorkingDirectory) --------
+# --- Runtime config ----------------------------------------------------------
+# A config file is optional (built-in defaults + the env overrides below apply if
+# absent). To use one, point ABYSSUM_CONFIG at an absolute path readable by the
+# service account, e.g.:
+# Environment=ABYSSUM_CONFIG=/etc/abyssum/abyssum.yaml
 # Web assets. Needed only until the embed-web-static-assets issue ships; point
 # it at a copy of abyssum-web/static/. Delete this line once assets are embedded.
 Environment=ABYSSUM_WEB_STATIC=/opt/abyssum/static

@@ -144,10 +144,21 @@ untrusted network: that serves the login and session cookies in cleartext.
 ## Configuration
 
 Configuration layers in strict precedence: **built-in defaults → YAML file →
-`ABYSSUM_*` environment variables** (each later source wins). The CLI and web binaries
-read `abyssum.yaml` from the working directory by default; override with `--config <path>`
-or `ABYSSUM_CONFIG`. A missing file is fine (defaults apply); a malformed file is a hard
-error.
+`ABYSSUM_*` environment variables** (each later source wins). Both binaries read the
+config from a fixed, working-directory-independent location by default, so a
+PATH-installed binary behaves the same wherever you run it:
+
+- **Config**: `$XDG_CONFIG_HOME/abyssum/abyssum.yaml` (i.e.
+  `~/.config/abyssum/abyssum.yaml`). Override with `--config <path>` or `ABYSSUM_CONFIG`.
+- **Database**: `$XDG_DATA_HOME/abyssum/abyssum.db` (i.e.
+  `~/.local/share/abyssum/abyssum.db`). Because both binaries resolve it from this one
+  shared default, CLI scans show up in the web dashboard with zero configuration.
+  Override with `ABYSSUM_DATABASE_PATH` or the YAML `database.path`.
+
+Parent directories are created on first use. A missing config file is fine (defaults
+apply); a malformed file is a hard error. Upgrading from an older build that used a
+CWD-relative `data/abyssum.db`? Move that file to the new location (or point
+`ABYSSUM_DATABASE_PATH` at it) to keep your existing sessions and admin account.
 
 A full `abyssum.yaml` with the defaults:
 
@@ -158,7 +169,7 @@ server:
   allow_private_custom_targets: false   # web custom-requests tool may hit private/reserved IPs
 
 database:
-  path: data/abyssum.db
+  path: /home/user/.local/share/abyssum/abyssum.db   # omit to use $XDG_DATA_HOME/abyssum/abyssum.db (~ is NOT expanded in YAML)
 
 scanning:
   min_delay: 1.0                # hard floor on inter-request delay (seconds); adaptive logic only slows past it

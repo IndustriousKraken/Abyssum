@@ -33,7 +33,9 @@ pub mod seed;
 pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, DEFAULT_TAG_COLOR, Note, Tag, TagApply, TagUsage};
 pub use auth::{AuthManager, Role, User, visible_session, visible_sessions};
-pub use config::{AiConfig, AuthConfig, Config, UserAgentRotation};
+pub use config::{
+    AiConfig, AuthConfig, Config, UserAgentRotation, default_config_path, default_database_path,
+};
 pub use custom_request::{
     CaptureResult, CapturedResponse, CustomRequestSpec, DEFAULT_BODY_PREVIEW_CAP,
     DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT, OutputFormat, PreparedRequest, RequestOutcome, Signal,

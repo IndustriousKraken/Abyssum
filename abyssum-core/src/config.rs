@@ -13,7 +13,7 @@
 //! file that *exists* but is malformed is a hard error: the system fails fast
 //! rather than starting in a partially-configured state.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,66 @@ use crate::error::{Error, Result};
 
 /// Prefix for all environment-variable configuration overrides.
 pub const ENV_PREFIX: &str = "ABYSSUM_";
+
+/// Default configuration-file path: `$XDG_CONFIG_HOME/abyssum/abyssum.yaml`
+/// (i.e. `~/.config/abyssum/abyssum.yaml`). This is CWD-independent so a
+/// PATH-installed binary reads the same config wherever it is run from. Falls
+/// back to the historical CWD-relative `abyssum.yaml` only when no home directory
+/// can be resolved. `--config` / `ABYSSUM_CONFIG` still override it.
+pub fn default_config_path() -> String {
+    config_path_from(&|k| std::env::var(k).ok())
+}
+
+/// Default database path: `$XDG_DATA_HOME/abyssum/abyssum.db`
+/// (i.e. `~/.local/share/abyssum/abyssum.db`). Because both binaries resolve the
+/// database from this one shared default, `abyssum` and `abyssum-web` use the
+/// same store with no configuration. Falls back to the historical CWD-relative
+/// `data/abyssum.db` only when no home directory can be resolved.
+/// `ABYSSUM_DATABASE_PATH` (or a YAML `database.path`) still overrides it.
+pub fn default_database_path() -> String {
+    database_path_from(&|k| std::env::var(k).ok())
+}
+
+/// Resolve an XDG base directory from `var` (e.g. `XDG_CONFIG_HOME`), falling
+/// back to `$HOME/`+`home_suffix`. A relative value in `var` is ignored per the
+/// XDG spec — honouring it would reintroduce the CWD-relative bug this fixes.
+/// Returns `None` when no absolute base can be found (e.g. `HOME` unset), so the
+/// caller can choose a sensible relative fallback rather than panic.
+fn xdg_base<F>(get_env: &F, var: &str, home_suffix: &str) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(v) = get_env(var) {
+        let p = PathBuf::from(&v);
+        if p.is_absolute() {
+            return Some(p);
+        }
+    }
+    let home = get_env("HOME").filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(home_suffix))
+}
+
+/// `default_config_path` with an injectable environment lookup (unit-testable).
+fn config_path_from<F>(get_env: &F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    xdg_base(get_env, "XDG_CONFIG_HOME", ".config")
+        .map(|d| d.join("abyssum").join("abyssum.yaml"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "abyssum.yaml".to_string())
+}
+
+/// `default_database_path` with an injectable environment lookup (unit-testable).
+fn database_path_from<F>(get_env: &F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    xdg_base(get_env, "XDG_DATA_HOME", ".local/share")
+        .map(|d| d.join("abyssum").join("abyssum.db"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data/abyssum.db".to_string())
+}
 
 /// Top-level runtime configuration for Abyssum.
 ///
@@ -194,7 +254,7 @@ impl Default for ServerConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            path: "data/abyssum.db".to_string(),
+            path: default_database_path(),
         }
     }
 }
@@ -392,7 +452,7 @@ mod tests {
         assert_eq!(cfg, Config::default());
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.port, 8000);
-        assert_eq!(cfg.database.path, "data/abyssum.db");
+        assert_eq!(cfg.database.path, default_database_path());
         assert_eq!(cfg.log.level, "info");
     }
 
@@ -416,7 +476,7 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         // untouched sections keep their defaults
         assert_eq!(cfg.scanning.min_delay, 1.0);
-        assert_eq!(cfg.database.path, "data/abyssum.db");
+        assert_eq!(cfg.database.path, default_database_path());
     }
 
     #[test]
@@ -658,5 +718,54 @@ mod tests {
         assert!(cfg.scanning.max_concurrency <= 16);
         // A default database location is present.
         assert!(!cfg.database.path.is_empty());
+    }
+
+    #[test]
+    fn default_paths_resolve_under_xdg_dirs() {
+        // With XDG_*_HOME set to absolute dirs, both defaults resolve beneath
+        // them — absolute and independent of the process working directory.
+        let cfg_env = env_of(&[("XDG_CONFIG_HOME", "/xdgcfg")]);
+        let data_env = env_of(&[("XDG_DATA_HOME", "/xdgdata")]);
+        assert_eq!(config_path_from(&cfg_env), "/xdgcfg/abyssum/abyssum.yaml");
+        assert_eq!(database_path_from(&data_env), "/xdgdata/abyssum/abyssum.db");
+    }
+
+    #[test]
+    fn default_paths_fall_back_to_home_when_no_xdg() {
+        let env = env_of(&[("HOME", "/home/tester")]);
+        assert_eq!(
+            config_path_from(&env),
+            "/home/tester/.config/abyssum/abyssum.yaml"
+        );
+        assert_eq!(
+            database_path_from(&env),
+            "/home/tester/.local/share/abyssum/abyssum.db"
+        );
+    }
+
+    #[test]
+    fn relative_xdg_is_ignored_in_favor_of_home() {
+        // A relative XDG value would reintroduce the CWD-relative bug, so the XDG
+        // spec says ignore it; HOME takes over and the result stays absolute.
+        let env = env_of(&[("XDG_DATA_HOME", "relative/dir"), ("HOME", "/home/tester")]);
+        let path = database_path_from(&env);
+        assert_eq!(path, "/home/tester/.local/share/abyssum/abyssum.db");
+        assert!(Path::new(&path).is_absolute());
+    }
+
+    #[test]
+    fn missing_home_and_xdg_falls_back_to_relative() {
+        // Degenerate environment (no HOME, no XDG): fall back to the historical
+        // CWD-relative path rather than panic.
+        let env = env_of(&[]);
+        assert_eq!(config_path_from(&env), "abyssum.yaml");
+        assert_eq!(database_path_from(&env), "data/abyssum.db");
+    }
+
+    #[test]
+    fn cli_and_web_share_one_default_database() {
+        // Both binaries build their `Config` from this crate, so neither defines
+        // its own DB default — they share the one resolver by construction.
+        assert_eq!(Config::default().database.path, default_database_path());
     }
 }

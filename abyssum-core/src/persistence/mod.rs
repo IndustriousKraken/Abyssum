@@ -87,7 +87,8 @@ impl DatabaseManager {
         let path = path.as_ref();
 
         // Create the parent directory if the configured path nests the file (e.g.
-        // the default `data/abyssum.db`). A bare filename has no parent to make.
+        // the default `$XDG_DATA_HOME/abyssum/abyssum.db`). A bare filename has no
+        // parent to make.
         // Use the async filesystem API so this `async fn` never issues a blocking
         // syscall on the executor — `connect` is a startup path today, but keeping
         // it await-friendly means it stays safe to call from any async context.
