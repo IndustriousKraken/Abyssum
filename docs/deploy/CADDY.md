@@ -82,6 +82,16 @@ Clients must be able to reach the address in the Caddyfile:
 - **Foreground / manual:** `sudo caddy run --config Caddyfile` (root or the
   `cap_net_bind_service` capability is required to bind `:443`).
 
+## Running abyssum-web as a service
+
+Run the app under systemd so its bind address, static-asset path, and DB location live
+in the unit rather than your shell — a redeploy is then just
+`./install.sh && sudo systemctl restart abyssum-web`, with nothing to remember and no
+settings lost between versions. Use the template at
+[`deploy/abyssum-web.service`](../../deploy/abyssum-web.service); it defaults to
+`127.0.0.1` (behind Caddy), and its header explains the home-directory and direct-LAN
+variants.
+
 ## Keep abyssum-web on localhost
 
 Leave `server.host` at its default `127.0.0.1` (do **not** set

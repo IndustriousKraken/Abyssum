@@ -1,0 +1,83 @@
+# Abyssum web UI — systemd unit (template).
+#
+# Copy to /etc/systemd/system/abyssum-web.service, edit the marked lines, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now abyssum-web
+#
+# Redeploy a new version (the binding/config survives because it lives here,
+# not in your shell):
+#   ./install.sh && sudo systemctl restart abyssum-web
+#
+# EDIT before use:
+#   User=/Group=       the account to run as
+#   WorkingDirectory=  dir holding abyssum.yaml (optional; defaults apply if absent)
+#   ExecStart=         path to the installed abyssum-web binary
+#   ABYSSUM_WEB_STATIC path to a copy of abyssum-web/static/ (see note below)
+#
+# Home-directory install (binary in ~/.local/bin, assets in ~/code/Abyssum)?
+# Set User= to your account, point the paths at your home dir, change
+# ExecStart= to ~/.local/bin/abyssum-web, and change `ProtectHome=true` to
+# `ProtectHome=read-only` (the app only READS its assets/config from home; the
+# writable DB lives in StateDirectory below, so read-only home is enough).
+
+[Unit]
+Description=Abyssum web UI
+Documentation=https://github.com/IndustriousKraken/Abyssum
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=abyssum
+Group=abyssum
+WorkingDirectory=/opt/abyssum
+ExecStart=/usr/local/bin/abyssum-web
+
+# --- Runtime config (abyssum.yaml is also read from WorkingDirectory) --------
+# Web assets. Needed only until the embed-web-static-assets issue ships; point
+# it at a copy of abyssum-web/static/. Delete this line once assets are embedded.
+Environment=ABYSSUM_WEB_STATIC=/opt/abyssum/static
+# Absolute DB path (systemd creates /var/lib/abyssum via StateDirectory below),
+# so persistence doesn't depend on the working directory.
+Environment=ABYSSUM_DATABASE_PATH=/var/lib/abyssum/abyssum.db
+# Bind address. Unset = 127.0.0.1 — correct when behind the Caddy reverse proxy
+# (deploy/Caddyfile.example), which is the recommended setup. Uncomment ONLY for
+# direct, UNENCRYPTED LAN access on a trusted network:
+# Environment=ABYSSUM_SERVER_HOST=0.0.0.0
+
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+TimeoutStopSec=20
+
+# --- Security hardening (if something breaks, comment from the bottom up) -----
+# The SQLite data directory is the only writable path; systemd creates and
+# owns /var/lib/abyssum and adds it to the writable set automatically.
+StateDirectory=abyssum
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+# TCP for the listener + outbound scanner/AI traffic; UDP resolves DNS.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
