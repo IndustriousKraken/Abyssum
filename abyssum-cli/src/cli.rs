@@ -100,7 +100,7 @@ pub struct Cli {
         long,
         value_name = "PATH",
         env = "ABYSSUM_CONFIG",
-        default_value = "abyssum.yaml"
+        default_value_t = abyssum_core::default_config_path()
     )]
     pub config: String,
 }
@@ -146,7 +146,7 @@ pub struct DiffArgs {
         long,
         value_name = "PATH",
         env = "ABYSSUM_CONFIG",
-        default_value = "abyssum.yaml"
+        default_value_t = abyssum_core::default_config_path()
     )]
     pub config: String,
 }
@@ -177,7 +177,7 @@ pub struct ReportArgs {
         long,
         value_name = "PATH",
         env = "ABYSSUM_CONFIG",
-        default_value = "abyssum.yaml"
+        default_value_t = abyssum_core::default_config_path()
     )]
     pub config: String,
 }

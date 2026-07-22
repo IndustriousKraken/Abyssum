@@ -63,16 +63,19 @@ no source tree" theme, for the web assets).
 
 ## Tasks
 
-- [ ] Resolve a default config path (`$XDG_CONFIG_HOME/abyssum/abyssum.yaml`) in
+- [x] Resolve a default config path (`$XDG_CONFIG_HOME/abyssum/abyssum.yaml`) in
       `abyssum-core`, and use it as the clap default in both `abyssum-cli` and
       `abyssum-web` instead of the relative `abyssum.yaml`.
-- [ ] Change `DatabaseConfig::default` to an absolute XDG data path
+- [x] Change `DatabaseConfig::default` to an absolute XDG data path
       (`$XDG_DATA_HOME/abyssum/abyssum.db`).
-- [ ] Handle a missing `HOME`/XDG environment gracefully (fall back sensibly or emit a
+- [x] Handle a missing `HOME`/XDG environment gracefully (fall back sensibly or emit a
       clear error); ensure `ABYSSUM_*` / `--config` overrides always take precedence.
-- [ ] Create parent directories on first use.
-- [ ] Update the README/config docs (which currently say config is read from the
+      (Falls back to the historical CWD-relative path; a relative `XDG_*_HOME` is
+      ignored per the XDG spec so the bug can't return.)
+- [x] Create parent directories on first use. (Persistence already `create_dir_all`s
+      the DB parent; nothing writes a config file, so no config-write path to add.)
+- [x] Update the README/config docs (which currently say config is read from the
       working directory) and note the new default locations; mention that existing
       `data/abyssum.db` users can move the file or set `ABYSSUM_DATABASE_PATH`.
-- [ ] Test: defaults resolve to the same absolute paths regardless of CWD, and CLI +
+- [x] Test: defaults resolve to the same absolute paths regardless of CWD, and CLI +
       web share one DB by default.
