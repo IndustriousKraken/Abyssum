@@ -169,7 +169,7 @@ server:
   allow_private_custom_targets: false   # web custom-requests tool may hit private/reserved IPs
 
 database:
-  path: ~/.local/share/abyssum/abyssum.db   # default; $XDG_DATA_HOME/abyssum/abyssum.db
+  path: /home/user/.local/share/abyssum/abyssum.db   # omit to use $XDG_DATA_HOME/abyssum/abyssum.db (~ is NOT expanded in YAML)
 
 scanning:
   min_delay: 1.0                # hard floor on inter-request delay (seconds); adaptive logic only slows past it
