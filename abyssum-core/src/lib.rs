@@ -29,6 +29,7 @@ pub mod rate_limiter;
 pub mod report;
 pub mod scan;
 pub mod seed;
+pub mod timing;
 
 pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, DEFAULT_TAG_COLOR, Note, Tag, TagApply, TagUsage};
@@ -46,7 +47,7 @@ pub use error::{Error, Result};
 pub use persistence::{
     DEFAULT_SEARCH_LIMIT, DatabaseManager, FindingFilter, MAX_SEARCH_LIMIT, Summary,
 };
-pub use rate_limiter::{Pace, RateLimiter};
+pub use rate_limiter::{Pace, PacingPolicy, RateLimiter};
 pub use report::{ReportFormat, ReportGenerator, ReportOptions};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Identity, Method, Orchestrator,
@@ -55,4 +56,7 @@ pub use scan::{
     Severity, SingleUserAgent, Status, Target, UserAgentSource, run_differential,
 };
 pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};
+pub use timing::{
+    DEFAULT_PROFILE_NAME, TIMING_POLICY_OPTION, TimingProfile, TimingProfileStore, builtin_library,
+};
 pub use tokio_util::sync::CancellationToken;

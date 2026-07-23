@@ -17,9 +17,11 @@
 //!
 //! - **First request per domain is free.** Reconnaissance starts immediately; only
 //!   subsequent requests to that domain are paced.
-//! - **Randomized base delay.** Each paced request waits a fresh uniform sample in
-//!   `[min_delay, max_delay]` — never a fixed or linearly-increasing value, both of
-//!   which are detectable fingerprints.
+//! - **Policy-driven base delay.** Each paced request waits a fresh sample drawn
+//!   from the active [`PacingPolicy`] — by default a uniform draw in
+//!   `[min_delay, max_delay]`, or an organic heavy-tailed shape when a timing
+//!   profile selects one (g05) — never a fixed or linearly-increasing value, both
+//!   of which are detectable fingerprints.
 //! - **Adaptive backoff.** A `429`/`403` (rate-limit / forbidden) or a `5xx`
 //!   (server distress) grows an additive, per-domain extra delay up to a cap; clean
 //!   responses decay it back toward zero.
@@ -46,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -140,46 +143,152 @@ pub struct RateLimiter {
     inner: Arc<Inner>,
 }
 
-/// One lane's randomized pacing window: a request's base delay is drawn uniformly
-/// from `[min_delay, max_delay]`, and `min_delay` is that lane's floor.
-#[derive(Debug, Clone, Copy)]
-struct Policy {
-    min_delay: Duration,
-    max_delay: Duration,
+/// The shape a lane's per-request base delay is drawn from — the **pacing policy**
+/// the rate limiter samples for each paced request.
+///
+/// By default a uniform band `[min, max]` (today's pacing and the conservative
+/// default); a timing profile (g05) can instead supply an [`Organic`] heavy-tailed
+/// shape whose gaps imitate irregular, non-periodic traffic. Every variant carries
+/// an absolute [`floor`](PacingPolicy::floor) the limiter applies *after* adding
+/// backoff, so no policy — not even a fast one — can drop a delay below its own
+/// minimum, and the adaptive backoff / distress halt sit entirely outside the
+/// policy (see [`RateLimiter::acquire_with`]).
+///
+/// All fields are seconds (`f64`) so a policy round-trips cleanly through config
+/// and the per-user timing-profile store; the limiter converts to [`Duration`] at
+/// the draw. Negative values are treated as `0`.
+///
+/// [`Organic`]: PacingPolicy::Organic
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum PacingPolicy {
+    /// Uniform draw in `[min_secs, max_secs]` — the conservative default shape.
+    Uniform {
+        /// Absolute floor and lower bound of the window, in seconds.
+        min_secs: f64,
+        /// Upper bound of the window, in seconds (collapses to `min_secs` if lower).
+        max_secs: f64,
+    },
+    /// Heavy-tailed "organic" draw: most gaps are an exponential spread around
+    /// `median_secs` (clamped to `[min_secs, max_secs]`), but with probability
+    /// `long_pause_prob` a much longer pause in `[max_secs, long_pause_secs]` is
+    /// injected. The result has no constant rate and no fixed period — the
+    /// "looks like a person browsing" shape (see the change design).
+    Organic {
+        /// Absolute floor, in seconds.
+        min_secs: f64,
+        /// Center of the typical-gap spread, in seconds.
+        median_secs: f64,
+        /// Cap on a typical (non-long-pause) gap, in seconds.
+        max_secs: f64,
+        /// Probability in `[0, 1]` that a given gap is an injected long pause.
+        long_pause_prob: f64,
+        /// Upper bound of an injected long pause, in seconds.
+        long_pause_secs: f64,
+    },
 }
 
-impl Policy {
-    /// Build a policy, collapsing an inverted window (`max < min`) to `[min, min]`
-    /// so the floor always wins.
-    fn new(min: Duration, max: Duration) -> Self {
-        Self {
-            min_delay: min,
-            max_delay: max.max(min),
+impl PacingPolicy {
+    /// A uniform policy over `[min_secs, max_secs]` (the default shape). An
+    /// inverted window collapses to `[min, min]` so the floor always wins.
+    pub fn uniform(min_secs: f64, max_secs: f64) -> Self {
+        let min = min_secs.max(0.0);
+        Self::Uniform {
+            min_secs: min,
+            max_secs: max_secs.max(min),
         }
     }
 
-    /// Draw a fresh uniform base delay in `[min_delay, max_delay]`. Returns
-    /// `min_delay` when the window has zero width (e.g. `min == max`).
-    fn sample(&self) -> Duration {
-        let min = self.min_delay.as_secs_f64();
-        let max = self.max_delay.as_secs_f64();
-        if max <= min {
-            return self.min_delay;
+    /// An organic policy sized from a plain `[min, max]` window: typical gaps
+    /// spread around the window mid-point and occasional long pauses reach a few
+    /// times the window's top. A convenience so a surface can offer an organic
+    /// profile (or let a user turn a window they picked into an organic one)
+    /// without hand-tuning every knob.
+    pub fn organic(min_secs: f64, max_secs: f64) -> Self {
+        let min = min_secs.max(0.0);
+        let max = max_secs.max(min).max(min + 0.001);
+        Self::Organic {
+            min_secs: min,
+            median_secs: (min + max) / 2.0,
+            max_secs: max,
+            long_pause_prob: 0.12,
+            // Long pauses reach ~4x the window top — "substantially longer than
+            // the typical gap" without ever being abusive.
+            long_pause_secs: max * 4.0,
         }
-        // Inclusive range so the draw matches the documented `[min, max]` band
-        // exactly (the half-open `min..max` could never return `max`).
-        let secs = rand::thread_rng().gen_range(min..=max);
-        Duration::from_secs_f64(secs)
+    }
+
+    /// The absolute floor (the minimum a drawn delay may ever be), as a
+    /// [`Duration`]. The limiter applies this after adding backoff.
+    fn floor(&self) -> Duration {
+        let secs = match *self {
+            PacingPolicy::Uniform { min_secs, .. } => min_secs,
+            PacingPolicy::Organic { min_secs, .. } => min_secs,
+        };
+        Duration::from_secs_f64(secs.max(0.0))
+    }
+
+    /// Draw a fresh base delay from this policy.
+    fn sample(&self) -> Duration {
+        let mut rng = rand::thread_rng();
+        let secs = match *self {
+            PacingPolicy::Uniform { min_secs, max_secs } => {
+                let min = min_secs.max(0.0);
+                let max = max_secs.max(min);
+                if max <= min {
+                    // Zero-width window: exactly the floor.
+                    min
+                } else {
+                    // Inclusive range so the draw matches the documented `[min, max]`
+                    // band exactly (half-open `min..max` could never return `max`).
+                    rng.gen_range(min..=max)
+                }
+            }
+            PacingPolicy::Organic {
+                min_secs,
+                median_secs,
+                max_secs,
+                long_pause_prob,
+                long_pause_secs,
+            } => {
+                let min = min_secs.max(0.0);
+                let max = max_secs.max(min);
+                if rng.gen_range(0.0f64..1.0) < long_pause_prob.clamp(0.0, 1.0) {
+                    // An occasional, much-longer pause in `[max, long_pause]`. This
+                    // is the heavy tail: gaps here are substantially longer than the
+                    // typical spread, breaking any constant-rate / volume-per-window
+                    // signature.
+                    let top = long_pause_secs.max(max);
+                    if top <= max {
+                        max
+                    } else {
+                        rng.gen_range(max..=top)
+                    }
+                } else {
+                    // A typical gap: an exponential draw (mean = median) gives a
+                    // non-uniform, non-periodic spread, clamped into the window.
+                    let mean = median_secs.max(min).max(1e-6);
+                    // `u` in `[0, 1)` ⇒ `1 - u` in `(0, 1]`, so `ln` is finite and
+                    // the inverse-CDF exponential sample is well-defined.
+                    let u: f64 = rng.gen_range(0.0f64..1.0);
+                    let sample = -mean * (1.0 - u).ln();
+                    sample.clamp(min, max)
+                }
+            }
+        };
+        Duration::from_secs_f64(secs.max(0.0))
     }
 }
 
 struct Inner {
-    /// Pacing for target traffic: the conservative floor, backoff, and distress halt.
-    target: Policy,
+    /// Default pacing for target traffic: the conservative floor, backoff, and
+    /// distress halt. A per-scan timing profile overrides *this draw* (not the
+    /// backoff or distress halt) via [`RateLimiter::acquire_with`].
+    target: PacingPolicy,
     /// Pacing for support-infrastructure lookups (public resolvers, CT/RDAP
     /// aggregators): a separate, faster window that is NOT held to the target floor
     /// and whose lane the target-distress halt never stops.
-    support: Policy,
+    support: PacingPolicy,
     /// Per-domain target-traffic state. The mutex is never held across a sleep, so
     /// each domain's pacing is independent and concurrent scanners interleave freely.
     target_domains: Mutex<HashMap<String, DomainState>>,
@@ -221,8 +330,11 @@ impl RateLimiter {
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                target: Policy::new(target_min, target_max),
-                support: Policy::new(support_min, support_max),
+                target: PacingPolicy::uniform(target_min.as_secs_f64(), target_max.as_secs_f64()),
+                support: PacingPolicy::uniform(
+                    support_min.as_secs_f64(),
+                    support_max.as_secs_f64(),
+                ),
                 target_domains: Mutex::new(HashMap::new()),
                 support_domains: Mutex::new(HashMap::new()),
             }),
@@ -240,7 +352,19 @@ impl RateLimiter {
     /// - If the domain is in sustained distress, returns [`Pace::Halt`] *without*
     ///   sleeping and without sending.
     pub async fn acquire(&self, domain: &str) -> Pace {
-        self.acquire_on(domain, &self.inner.target, &self.inner.target_domains, true)
+        self.acquire_with(domain, None).await
+    }
+
+    /// Like [`acquire`](Self::acquire), but draws the base delay from `policy` when
+    /// one is supplied — the seam a per-scan **timing profile** rides through
+    /// (g05). `None` falls back to the limiter's configured target policy (the
+    /// conservative default). Only the base-delay *draw* is policy-dependent: the
+    /// per-domain adaptive backoff and the target-distress halt are unchanged and
+    /// apply under every policy, so no profile can turn the scanner into something
+    /// that keeps hammering a target through distress signals.
+    pub async fn acquire_with(&self, domain: &str, policy: Option<&PacingPolicy>) -> Pace {
+        let policy = policy.unwrap_or(&self.inner.target);
+        self.acquire_on(domain, policy, &self.inner.target_domains, true)
             .await
     }
 
@@ -268,7 +392,7 @@ impl RateLimiter {
     async fn acquire_on(
         &self,
         domain: &str,
-        policy: &Policy,
+        policy: &PacingPolicy,
         domains: &Mutex<HashMap<String, DomainState>>,
         halt_on_distress: bool,
     ) -> Pace {
@@ -293,10 +417,10 @@ impl RateLimiter {
             let base = policy.sample();
             let extra = state.backoff;
             // The floor is absolute and asserted right at the sleep site, so it
-            // holds no matter how the delay formula evolves. Each lane is floored at
-            // its *own* minimum — the support lane at its faster floor, never the
-            // target one.
-            let delay = (base + extra).max(policy.min_delay);
+            // holds no matter how the delay formula evolves. Each policy is floored
+            // at its *own* minimum — the support lane at its faster floor, an
+            // aggressive profile at its lower floor, never another's.
+            let delay = (base + extra).max(policy.floor());
             debug!(
                 domain = %domain,
                 base_ms = base.as_millis() as u64,
@@ -777,6 +901,139 @@ mod tests {
         assert!(
             support_total * 4 < target_total,
             "support phase ({support_total:?}) should be far faster than {N} target probes ({target_total:?})"
+        );
+    }
+
+    // --- g05: timing profiles (per-scan pacing policy) -------------------------
+
+    /// `acquire_with` timed like [`timed_acquire`], under the paused clock.
+    async fn timed_acquire_with(
+        rl: &RateLimiter,
+        domain: &str,
+        policy: Option<&PacingPolicy>,
+    ) -> (Pace, Duration) {
+        let start = Instant::now();
+        let pace = rl.acquire_with(domain, policy).await;
+        (pace, start.elapsed())
+    }
+
+    // The organic shape's gaps are irregular (not all near-equal), heavy-tailed
+    // (occasional gaps substantially longer than the typical one), floored, and
+    // aperiodic (no fixed period) — the whole point of the "looks organic" profile.
+    #[test]
+    fn organic_gaps_are_irregular_heavy_tailed_and_aperiodic() {
+        let organic = PacingPolicy::Organic {
+            min_secs: 0.5,
+            median_secs: 2.0,
+            max_secs: 6.0,
+            long_pause_prob: 0.15,
+            long_pause_secs: 30.0,
+        };
+        let floor = organic.floor();
+
+        const N: usize = 600;
+        const MEDIAN: f64 = 2.0;
+        let mut samples = Vec::with_capacity(N);
+        for _ in 0..N {
+            let d = organic.sample();
+            assert!(d >= floor, "organic draw dipped below its floor: {d:?}");
+            samples.push(d.as_secs_f64());
+        }
+
+        // Scenario "gaps are irregular and heavy-tailed": the spread is wide, not a
+        // narrow constant band. Measure the coefficient of variation (stddev/mean);
+        // a heavy-tailed organic draw sits well above a uniform band's ~0.3.
+        let mean = samples.iter().sum::<f64>() / N as f64;
+        let variance = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / N as f64;
+        let cv = variance.sqrt() / mean;
+        assert!(
+            cv > 0.5,
+            "organic gaps are too uniform to be irregular (cv {cv:.2} ≤ 0.5)"
+        );
+
+        // Scenario "occasional gaps substantially longer than the typical gap": the
+        // heavy tail injects long pauses that break volume-per-window detection.
+        let max = samples.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            max > 3.0 * MEDIAN,
+            "organic never injected a long pause (max gap {max}s ≤ 3× median)"
+        );
+
+        // Scenario "no fixed period": a fixed cadence of period p repeats within at
+        // most p distinct values. A continuous draw yields far more distinct gaps
+        // than any short period could, so no short periodic pattern can reproduce
+        // the sequence. (Floor/ceiling clamping pins a minority of draws to exact
+        // bounds, so this is well under N but still large.)
+        let distinct = samples
+            .iter()
+            .map(|s| (s * 1e6) as i64)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(
+            distinct > N / 3,
+            "organic gaps repeat too tightly to be aperiodic: {distinct}/{N} distinct"
+        );
+    }
+
+    // Selecting a profile changes a scan's target pacing: a fast profile paces well
+    // below the limiter's conservative default floor, while an unprofiled domain on
+    // the same limiter stays at that floor.
+    #[tokio::test(start_paused = true)]
+    async fn selected_profile_changes_target_pacing() {
+        // Conservative default: a fixed 2s target floor.
+        let rl = limiter(2.0, 2.0);
+        let fast = PacingPolicy::uniform(0.1, 0.1);
+
+        // The fast profile paces the target lane far below the 2s default floor.
+        let _ = rl.acquire_with("fast.test", Some(&fast)).await; // free first request
+        let (_, fast_delay) = timed_acquire_with(&rl, "fast.test", Some(&fast)).await;
+        assert!(
+            fast_delay < Duration::from_secs_f64(1.0),
+            "selected fast profile did not speed up target pacing: {fast_delay:?}"
+        );
+
+        // A domain with no profile stays at the conservative default floor.
+        let _ = rl.acquire("slow.test").await; // free first request
+        let (_, default_delay) = timed_acquire(&rl, "slow.test").await;
+        assert!(
+            default_delay >= Duration::from_secs_f64(2.0),
+            "unprofiled domain must stay at the conservative default: {default_delay:?}"
+        );
+    }
+
+    // The distress halt fires regardless of the selected profile — a profile
+    // parameterizes only the base draw, never the safety stop.
+    #[tokio::test(start_paused = true)]
+    async fn distress_halt_fires_under_any_profile() {
+        let rl = limiter(1.0, 1.0);
+        let fast = PacingPolicy::uniform(0.01, 0.01);
+
+        // Drive the domain into sustained distress on the target lane.
+        for _ in 0..DISTRESS_WINDOW {
+            rl.record_signal("d.test", 500).await;
+        }
+        // Even under an aggressive fast profile, probing halts.
+        assert_eq!(
+            rl.acquire_with("d.test", Some(&fast)).await,
+            Pace::Halt,
+            "distress halt must fire under any selected profile"
+        );
+    }
+
+    // Adaptive backoff still grows the delay under a selected profile: a fixed-base
+    // fast profile plus a rate-limit signal must still slow down.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_still_applies_under_a_profile() {
+        let rl = limiter(1.0, 1.0);
+        let fast = PacingPolicy::uniform(0.05, 0.05);
+        let _ = rl.acquire_with("d.test", Some(&fast)).await; // free first request
+
+        let (_, before) = timed_acquire_with(&rl, "d.test", Some(&fast)).await;
+        rl.record_signal("d.test", 429).await;
+        let (_, after) = timed_acquire_with(&rl, "d.test", Some(&fast)).await;
+        assert!(
+            after > before,
+            "a rate-limit signal must grow the delay even under a profile: {after:?} !> {before:?}"
         );
     }
 }

@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::rate_limiter::{Pace, RateLimiter};
+use crate::rate_limiter::{Pace, PacingPolicy, RateLimiter};
 
 use super::options::ScanOptions;
 use super::progress::{ProgressCallback, ProgressUpdate};
@@ -205,6 +205,11 @@ pub struct ScanContext {
     cancel: CancellationToken,
     auth: Option<Credential>,
     options: Arc<ScanOptions>,
+    /// The pacing policy for this scan's **target** traffic, resolved from the
+    /// selected timing profile (g05). `None` ⇒ the rate limiter's configured
+    /// conservative default. Only the base-delay draw is policy-dependent; the
+    /// adaptive backoff and distress halt apply regardless (see [`RateLimiter`]).
+    target_pacing: Option<PacingPolicy>,
 }
 
 impl ScanContext {
@@ -227,6 +232,7 @@ impl ScanContext {
             cancel,
             auth: None,
             options: Arc::new(ScanOptions::default()),
+            target_pacing: None,
         }
     }
 
@@ -243,6 +249,15 @@ impl ScanContext {
     /// so the per-unit context clones stay cheap.
     pub fn with_options(mut self, options: Arc<ScanOptions>) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Set the pacing policy this scan's target traffic is drawn from (builder-style),
+    /// resolved from the selected timing profile (g05). A context without this uses
+    /// the rate limiter's configured conservative default. The support lane and the
+    /// backoff/distress protections are unaffected.
+    pub fn with_target_pacing(mut self, policy: PacingPolicy) -> Self {
+        self.target_pacing = Some(policy);
         self
     }
 
@@ -322,11 +337,14 @@ impl ScanContext {
 
         // Pace first — the floor is enforced here, before any bytes leave. A
         // support-infrastructure lookup uses the separate, faster support lane;
-        // everything else is target traffic held to the conservative floor.
+        // everything else is target traffic paced by the scan's selected timing
+        // profile (or the conservative default when none was selected).
         let pace = if support {
             self.rate_limiter.acquire_support(&host).await
         } else {
-            self.rate_limiter.acquire(&host).await
+            self.rate_limiter
+                .acquire_with(&host, self.target_pacing.as_ref())
+                .await
         };
         match pace {
             Pace::Halt => {
