@@ -118,6 +118,12 @@ pub struct ServerConfig {
     /// an operator legitimately testing an internal API turns this on deliberately
     /// (conservative-by-default, aggression opt-in).
     pub allow_private_custom_targets: bool,
+    /// Maximum size, in bytes, of an engagement scope/authorization document
+    /// uploaded through the web UI (h01). An upload whose decoded bytes exceed this
+    /// is rejected with a clear error rather than stored or truncated. Generous
+    /// enough for a signed PDF authorization, bounded so an upload cannot exhaust
+    /// storage.
+    pub max_document_bytes: usize,
 }
 
 /// Persistence location.
@@ -274,6 +280,9 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8000,
             allow_private_custom_targets: false,
+            // 10 MiB: comfortably holds a signed PDF authorization, bounded so an
+            // upload cannot exhaust storage.
+            max_document_bytes: 10 * 1024 * 1024,
         }
     }
 }
@@ -388,6 +397,9 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SERVER_ALLOW_PRIVATE_CUSTOM_TARGETS") {
             self.server.allow_private_custom_targets =
                 parse_env("ABYSSUM_SERVER_ALLOW_PRIVATE_CUSTOM_TARGETS", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SERVER_MAX_DOCUMENT_BYTES") {
+            self.server.max_document_bytes = parse_env("ABYSSUM_SERVER_MAX_DOCUMENT_BYTES", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_DATABASE_PATH") {
             self.database.path = v;

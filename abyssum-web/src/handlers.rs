@@ -17,9 +17,15 @@ use abyssum_core::{
 };
 use abyssum_scanners::WORDLIST_OPTION;
 use axum::Extension;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::http::header::{
+    CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+    X_FRAME_OPTIONS,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
+use base64::Engine;
 use serde::Deserialize;
 use tokio::net::lookup_host;
 use url::Host;
@@ -140,8 +146,14 @@ pub async fn scan_page(
         .list_for_user(user.id)
         .await
         .unwrap_or_default();
+    // The user's authorized engagements populate the optional engagement selector.
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
     auth::html(
-        view::scan_page(&user, &csrf, &scanners, &profiles, &wordlists),
+        view::scan_page(&user, &csrf, &scanners, &profiles, &wordlists, &engagements),
         set,
     )
 }
@@ -172,10 +184,16 @@ pub async fn scan_detail(
         Ok(session) => session,
         Err(_) => return not_visible(),
     };
-    let (_csrf, set) = auth::ensure_csrf(&headers);
+    let (csrf, set) = auth::ensure_csrf(&headers);
     // A live scan's in-memory state is fresher than the (Pending) persisted row.
     let session = state.hub.snapshot(id).unwrap_or(persisted);
-    auth::html(view::scan_detail(&user, &session), set)
+    // The user's authorized engagements populate the "assign to engagement" form.
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
+    auth::html(view::scan_detail(&user, &csrf, &session, &engagements), set)
 }
 
 // --- Fragments -------------------------------------------------------------
@@ -414,6 +432,14 @@ pub async fn start_scan(
     let snapshot = handle.lock().expect("session not poisoned").clone();
     if state.db.save_session(&snapshot).await.is_err() {
         return server_error();
+    }
+
+    // Optional engagement association chosen on the form. Best-effort: the store
+    // owner-scopes it, so a blank, non-numeric, or foreign id simply leaves the
+    // scan unassociated — it never blocks or alters the run (scope is reference
+    // material only). Requires the Pending row above so the session is visible.
+    if let Some(eid) = field(&form, "engagement").and_then(|v| v.trim().parse::<i64>().ok()) {
+        let _ = state.engagements.assign_session(&user, Some(eid), id).await;
     }
 
     spawn_scan(state.clone(), id, handle);
@@ -679,6 +705,249 @@ fn policy_from_form(form: &[(String, String)]) -> Result<PacingPolicy, String> {
         Some("organic") => PacingPolicy::organic(min, max),
         _ => PacingPolicy::uniform(min, max),
     })
+}
+
+// --- Engagements -----------------------------------------------------------
+
+/// `GET /engagements` — the operator's authorized engagements plus a create form
+/// (admin sees all). Private to the authorized set.
+pub async fn engagements_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    let (csrf, set) = auth::ensure_csrf(&headers);
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
+    auth::html(view::engagements_page(&user, &csrf, &engagements), set)
+}
+
+/// `POST /engagements` — create an engagement owned by the authenticated operator.
+pub async fn create_engagement(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("");
+    match state.engagements.create(&user, name).await {
+        Ok(engagement) => auth::redirect(&format!("/engagements/{}", engagement.id), &[]),
+        Err(err) => fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
+    }
+}
+
+/// `GET /engagements/{id}` — one engagement: its associated scans and attached
+/// documents (owner/authorized-checked; a non-authorized viewer gets a 404).
+pub async fn engagement_detail(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    render_engagement_detail(&state, &user, id, &headers, None).await
+}
+
+/// A sane ceiling on how many extra bytes a document request body may carry beyond
+/// the decoded document itself (base64 inflation ≈ ×1.34 plus urlencoding), added
+/// to twice the configured max so the *store* — not this guard — reports an
+/// oversized document with a clear message.
+const DOCUMENT_BODY_SLACK: usize = 64 * 1024;
+
+/// `POST /engagements/{id}/documents` — attach a scope/authorization document:
+/// pasted text (`kind=text`), an external URL (`kind=url`), or an uploaded file
+/// (`kind=file`, its bytes base64/data-URL-encoded in `file_data`). Owner-scoped;
+/// the store rejects an oversized or disallowed upload without storing it.
+pub async fn attach_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // Reject an absurd body before parsing. The real document-size bound is the
+    // configured `max_document_bytes`, enforced by the store on the decoded bytes.
+    let body_cap = state
+        .config
+        .server
+        .max_document_bytes
+        .saturating_mul(2)
+        .saturating_add(DOCUMENT_BODY_SLACK);
+    if body.len() > body_cap {
+        return fail_page(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "document upload is too large",
+        );
+    }
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+
+    let kind = field(&form, "kind").unwrap_or("text");
+    let result = match kind {
+        "url" => {
+            let url = field(&form, "url").unwrap_or("");
+            state.engagements.attach_url(&user, id, url).await
+        }
+        "file" => match decode_upload(field(&form, "file_data").unwrap_or("")) {
+            Ok(bytes) => {
+                let filename = field(&form, "file_name").unwrap_or("document");
+                state
+                    .engagements
+                    .attach_file(
+                        &user,
+                        id,
+                        filename,
+                        &bytes,
+                        state.config.server.max_document_bytes,
+                    )
+                    .await
+            }
+            Err(msg) => Err(abyssum_core::Error::Other(msg)),
+        },
+        // Default (and explicit "text"): pasted scope text.
+        _ => {
+            let content = field(&form, "content").unwrap_or("");
+            state.engagements.attach_text(&user, id, content).await
+        }
+    };
+
+    match result {
+        Ok(_) => auth::redirect(&format!("/engagements/{id}"), &[]),
+        // An authorization/visibility failure discloses nothing (404); a validation
+        // error (empty, oversized, disallowed type, bad URL) re-renders in place.
+        Err(abyssum_core::Error::Auth(_)) => not_visible(),
+        Err(err) => {
+            render_engagement_detail(&state, &user, id, &headers, Some(clean_err(err))).await
+        }
+    }
+}
+
+/// `GET /engagements/{id}/documents/{doc_id}` — serve an uploaded document's bytes
+/// **safely**: with the content type the engine detected from the bytes (never the
+/// client's claim, never `text/html`), sniffing disabled, a `Content-Disposition`,
+/// and a strict `sandbox` CSP that also allows same-origin framing so a PDF renders
+/// inline via the browser's native viewer. A viewer who may not see it gets a 404.
+pub async fn serve_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, doc_id)): Path<(i64, i64)>,
+) -> Response {
+    let blob = match state.engagements.document_blob(&user, id, doc_id).await {
+        Ok(blob) => blob,
+        Err(_) => return not_visible(),
+    };
+    // ponytail: `sandbox` gives the strongest isolation and modern browsers still
+    // render a PDF under it; the content-type + nosniff already stop the bytes
+    // executing as page content, so drop `sandbox` only if a browser's native PDF
+    // viewer ever fails to render inline under it.
+    Response::builder()
+        .header(CONTENT_TYPE, blob.content_type)
+        .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", blob.filename),
+        )
+        .header(
+            CONTENT_SECURITY_POLICY,
+            "default-src 'none'; frame-ancestors 'self'; sandbox",
+        )
+        .header(X_FRAME_OPTIONS, "SAMEORIGIN")
+        .body(Body::from(blob.bytes))
+        .unwrap_or_else(|_| server_error())
+}
+
+/// `POST /scan/{id}/assign` — associate an existing scan with an engagement (or
+/// clear its association when the field is blank). Both the scan and the chosen
+/// engagement must be visible to the operator; the store records who assigned it.
+pub async fn assign_scan(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    // A blank selection clears the association; otherwise a numeric engagement id.
+    let engagement = field(&form, "engagement")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok());
+    match state
+        .engagements
+        .assign_session(&user, engagement, id)
+        .await
+    {
+        Ok(()) => auth::redirect(&format!("/scan/{id}"), &[]),
+        Err(_) => not_visible(),
+    }
+}
+
+/// Render an engagement's detail page (its scans + documents), optionally with a
+/// notice from a failed document attach. Shared by the GET route and the attach
+/// error path. A viewer who may not see the engagement gets a 404.
+async fn render_engagement_detail(
+    state: &AppState,
+    user: &User,
+    id: i64,
+    headers: &HeaderMap,
+    notice: Option<String>,
+) -> Response {
+    let engagement = match state.engagements.get_for_user(user, id).await {
+        Ok(engagement) => engagement,
+        Err(_) => return not_visible(),
+    };
+    let (csrf, set) = auth::ensure_csrf(headers);
+    let sessions = state
+        .engagements
+        .sessions_for_engagement(user, id)
+        .await
+        .unwrap_or_default();
+    let documents = state
+        .engagements
+        .documents(user, id)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::engagement_detail(
+            user,
+            &csrf,
+            &engagement,
+            &sessions,
+            &documents,
+            notice.as_deref(),
+        ),
+        set,
+    )
+}
+
+/// Decode an uploaded file field into raw bytes. The browser submits the file as a
+/// base64 data URL (`data:<type>;base64,<payload>`) read client-side; a bare base64
+/// payload is accepted too. The declared type in the prefix is ignored — the store
+/// detects the real type from the decoded bytes.
+fn decode_upload(field_value: &str) -> Result<Vec<u8>, String> {
+    let value = field_value.trim();
+    if value.is_empty() {
+        return Err("no file was selected".to_string());
+    }
+    // Strip an optional `data:...,` prefix, keeping only the base64 payload.
+    let payload = match value.split_once(',') {
+        Some((prefix, rest)) if prefix.starts_with("data:") => rest,
+        _ => value,
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .map_err(|_| "the uploaded file could not be decoded".to_string())
 }
 
 // --- SSRF guard ------------------------------------------------------------

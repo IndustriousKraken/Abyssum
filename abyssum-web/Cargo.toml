@@ -51,3 +51,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Encode a file's bytes for the engagement document-upload integration tests, the
+# same way the browser submits an upload (a base64 data field).
+base64 = "0.22"

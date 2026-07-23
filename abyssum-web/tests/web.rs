@@ -828,6 +828,378 @@ async fn wordlist_import_reports_and_is_private_to_its_owner() {
     );
 }
 
+// --- Engagements (h01) -----------------------------------------------------
+
+/// base64-encode bytes the way the browser submits a file upload (a data field).
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Create an engagement via the web form and return its id (parsed from the
+/// redirect Location).
+async fn create_engagement(client: &mut Client, name: &str) -> i64 {
+    let body = format!("name={}&_csrf={}", enc(name), enc(&client.csrf()));
+    let resp = client.post_form("/engagements", &body).await;
+    assert_eq!(resp.status, 303, "engagement create redirects");
+    resp.location()
+        .unwrap()
+        .strip_prefix("/engagements/")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Create → attach text/URL/PDF → serve the PDF safely → reject a disallowed
+/// upload → assign an existing scan, all as one authorized operator.
+#[tokio::test]
+async fn engagement_create_attach_serve_and_assign() {
+    let app = TestApp::spawn().await;
+    let alice = make_user(&app, "alice").await; // first → admin, but acts as owner here
+
+    let mut c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut c, "Acme Q3").await;
+
+    // The detail page opens and shows the engagement name.
+    let detail = c.get(&format!("/engagements/{eid}")).await;
+    assert_eq!(detail.status, 200);
+    assert!(detail.body.contains("Acme Q3"));
+
+    // Attach pasted scope text — shown inline as text.
+    let body = format!(
+        "kind=text&content={}&_csrf={}",
+        enc("In scope: *.acme.example"),
+        enc(&c.csrf())
+    );
+    assert_eq!(
+        c.post_form(&format!("/engagements/{eid}/documents"), &body)
+            .await
+            .status,
+        303
+    );
+
+    // Attach a scope URL — shown as a link.
+    let body = format!(
+        "kind=url&url={}&_csrf={}",
+        enc("https://acme.example/security"),
+        enc(&c.csrf())
+    );
+    assert_eq!(
+        c.post_form(&format!("/engagements/{eid}/documents"), &body)
+            .await
+            .status,
+        303
+    );
+
+    // Upload a PDF authorization (bytes are ASCII so the raw client can compare them).
+    let pdf = b"%PDF-1.7 signed authorization";
+    let body = format!(
+        "kind=file&file_name=auth.pdf&file_data={}&_csrf={}",
+        enc(&b64(pdf)),
+        enc(&c.csrf())
+    );
+    assert_eq!(
+        c.post_form(&format!("/engagements/{eid}/documents"), &body)
+            .await
+            .status,
+        303
+    );
+
+    // The detail page now renders the text inline, the URL as a link, and the PDF
+    // inline via a same-origin <iframe> (the browser's native viewer, no external code).
+    let detail = c.get(&format!("/engagements/{eid}")).await;
+    assert!(
+        detail.body.contains("In scope: *.acme.example"),
+        "text shown inline"
+    );
+    assert!(
+        detail.body.contains("https://acme.example/security"),
+        "url shown"
+    );
+    assert!(
+        detail.body.contains("<iframe")
+            && detail
+                .body
+                .contains(&format!("/engagements/{eid}/documents/")),
+        "PDF embedded inline via a same-origin iframe: {}",
+        detail.body
+    );
+    assert!(
+        !detail.body.contains("http://") || !detail.body.contains("://cdn"),
+        "no external code is loaded to render the document"
+    );
+
+    // Find the served document's URL and fetch it: served with a fixed document
+    // content type, sniffing off, a Content-Disposition, and NOT as text/html.
+    // (Document ids autoincrement across the table, so resolve the file's id.)
+    let file_id = app
+        .state
+        .engagements
+        .documents(&alice, eid)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|d| d.kind == abyssum_core::DocumentKind::File)
+        .unwrap()
+        .id;
+    let doc_path = format!("/engagements/{eid}/documents/{file_id}");
+    let served = c.get(&doc_path).await;
+    assert_eq!(served.status, 200);
+    let ct = served.header("content-type").unwrap_or("");
+    assert!(
+        ct.contains("application/pdf"),
+        "fixed document content type: {ct}"
+    );
+    assert!(!ct.contains("text/html"), "never served as active HTML");
+    assert_eq!(served.header("x-content-type-options"), Some("nosniff"));
+    assert!(
+        served
+            .header("content-disposition")
+            .is_some_and(|v| v.contains("inline")),
+        "carries a Content-Disposition"
+    );
+    assert!(
+        served
+            .header("content-security-policy")
+            .is_some_and(|v| v.contains("sandbox")),
+        "sandboxed so it cannot execute in the app origin"
+    );
+    assert_eq!(served.header("x-frame-options"), Some("SAMEORIGIN"));
+    assert!(
+        served.body.contains("signed authorization"),
+        "the stored bytes are served"
+    );
+
+    // A disallowed upload (a PNG — binary, not a PDF, not text) is rejected and
+    // not stored: the page re-renders with an error and no new document endpoint.
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00rejectme";
+    let body = format!(
+        "kind=file&file_name=logo.png&file_data={}&_csrf={}",
+        enc(&b64(png)),
+        enc(&c.csrf())
+    );
+    let resp = c
+        .post_form(&format!("/engagements/{eid}/documents"), &body)
+        .await;
+    assert_eq!(
+        resp.status, 200,
+        "a rejected upload re-renders the page, not a redirect"
+    );
+    assert!(
+        resp.body.to_lowercase().contains("unsupported"),
+        "rejection reported: {}",
+        resp.body
+    );
+    // Only the three valid documents exist; the PNG endpoint 404s.
+    let store = app.state.engagements.documents(&alice, eid).await.unwrap();
+    assert_eq!(store.len(), 3, "the disallowed upload was not stored");
+
+    // Assign an existing scan to the engagement; it then appears under it.
+    let sid = seed_session(&app, alice.id, "https://scan.example", &[]).await;
+    let body = format!("engagement={eid}&_csrf={}", enc(&c.csrf()));
+    let resp = c.post_form(&format!("/scan/{sid}/assign"), &body).await;
+    assert_eq!(resp.status, 303);
+    let detail = c.get(&format!("/engagements/{eid}")).await;
+    assert!(
+        detail.body.contains(&sid.to_string()[..8]),
+        "the assigned scan is listed under the engagement"
+    );
+}
+
+/// Per-user visibility: a non-admin cannot list, open, or fetch documents of an
+/// engagement they are not authorized for; an admin can.
+#[tokio::test]
+async fn engagement_visibility_is_owner_only_with_admin_override() {
+    let app = TestApp::spawn().await;
+    let _admin = make_user(&app, "admin").await; // first → admin
+    let alice = make_user(&app, "alice").await;
+    let _bob = make_user(&app, "bob").await;
+
+    let mut alice_c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut alice_c, "alice-private-engagement").await;
+    let pdf = b"%PDF-1.4 alice secret";
+    let body = format!(
+        "kind=file&file_name=auth.pdf&file_data={}&_csrf={}",
+        enc(&b64(pdf)),
+        enc(&alice_c.csrf())
+    );
+    alice_c
+        .post_form(&format!("/engagements/{eid}/documents"), &body)
+        .await;
+    let doc_path = format!("/engagements/{eid}/documents/1");
+
+    // Bob sees nothing of it: not in his list, and detail/document both 404.
+    let mut bob_c = authed_client(&app, "bob").await;
+    let list = bob_c.get("/engagements").await;
+    assert!(
+        !list.body.contains("alice-private-engagement"),
+        "not in bob's list"
+    );
+    assert_eq!(bob_c.get(&format!("/engagements/{eid}")).await.status, 404);
+    assert_eq!(bob_c.get(&doc_path).await.status, 404);
+    // Bob cannot attach to it either.
+    let body = format!("kind=text&content=intrude&_csrf={}", enc(&bob_c.csrf()));
+    assert_eq!(
+        bob_c
+            .post_form(&format!("/engagements/{eid}/documents"), &body)
+            .await
+            .status,
+        404
+    );
+
+    // Admin can list, open, and fetch the document.
+    let mut admin_c = authed_client(&app, "admin").await;
+    assert!(
+        admin_c
+            .get("/engagements")
+            .await
+            .body
+            .contains("alice-private-engagement")
+    );
+    assert_eq!(
+        admin_c.get(&format!("/engagements/{eid}")).await.status,
+        200
+    );
+    let served = admin_c.get(&doc_path).await;
+    assert_eq!(served.status, 200);
+    assert!(served.body.contains("alice secret"));
+
+    // Bob's own list stays empty even though alice has one.
+    assert!(
+        app.state
+            .engagements
+            .list_for_user(&alice)
+            .await
+            .unwrap()
+            .len()
+            == 1
+    );
+}
+
+/// The start-scan form offers an engagement selector, and choosing one associates
+/// the created scan with it — while the scan still runs unchanged.
+#[tokio::test]
+async fn start_scan_can_select_an_engagement() {
+    let app = TestApp::spawn().await;
+    make_user(&app, "operator").await;
+    let mut c = authed_client(&app, "operator").await;
+    let eid = create_engagement(&mut c, "Live engagement").await;
+
+    // The scan form now offers the engagement.
+    let form = c.get("/scan").await;
+    assert!(
+        form.body.contains("Live engagement"),
+        "scan form offers the engagement"
+    );
+    assert!(
+        form.body.contains("name=\"engagement\""),
+        "scan form has the engagement selector"
+    );
+
+    // Start a scan choosing that engagement.
+    let mock = spawn_cors_mock(Duration::from_millis(0)).await;
+    let target = format!("http://{mock}/");
+    let body = format!(
+        "targets={}&scanners=cors&engagement={eid}&_csrf={}",
+        enc(&target),
+        enc(&c.csrf())
+    );
+    let resp = c.post_form("/scans", &body).await;
+    assert_eq!(resp.status, 303);
+    let sid = resp.location().unwrap().strip_prefix("/scan/").unwrap();
+
+    // The scan is associated with the engagement (visible on its detail page).
+    let detail = c.get(&format!("/engagements/{eid}")).await;
+    assert!(
+        detail.body.contains(&sid[..8]),
+        "the started scan is associated with the chosen engagement"
+    );
+}
+
+/// An oversized upload is rejected and not stored (size bound enforced).
+#[tokio::test]
+async fn oversized_document_upload_is_rejected() {
+    // A tiny per-document cap so a small payload trips the bound.
+    let app = TestApp::spawn_with(|cfg| cfg.server.max_document_bytes = 16).await;
+    let alice = make_user(&app, "alice").await;
+    let mut c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut c, "Bounds").await;
+
+    // 40 bytes of PDF > the 16-byte cap.
+    let pdf = b"%PDF-1.7 this document is over the size cap";
+    let body = format!(
+        "kind=file&file_name=big.pdf&file_data={}&_csrf={}",
+        enc(&b64(pdf)),
+        enc(&c.csrf())
+    );
+    let resp = c
+        .post_form(&format!("/engagements/{eid}/documents"), &body)
+        .await;
+    assert_eq!(
+        resp.status, 200,
+        "re-renders with an error rather than storing"
+    );
+    assert!(
+        resp.body.to_lowercase().contains("too large"),
+        "size rejection reported: {}",
+        resp.body
+    );
+    assert!(
+        app.state
+            .engagements
+            .documents(&alice, eid)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the oversized upload was not stored"
+    );
+}
+
+/// A file whose bytes are HTML/script is stored and served as inert text/plain,
+/// never as active HTML — so it cannot execute in the app's origin (stored-XSS
+/// guard). The served type is decided from the bytes, not the upload's claim.
+#[tokio::test]
+async fn uploaded_html_is_served_as_inert_text_not_active_content() {
+    let app = TestApp::spawn().await;
+    let alice = make_user(&app, "alice").await;
+    let mut c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut c, "XSS check").await;
+
+    // A file whose bytes could be interpreted as HTML/script by a sniffing browser.
+    let html = b"<html><script>alert(document.domain)</script></html>";
+    let body = format!(
+        "kind=file&file_name=evil.html&file_data={}&_csrf={}",
+        enc(&b64(html)),
+        enc(&c.csrf())
+    );
+    assert_eq!(
+        c.post_form(&format!("/engagements/{eid}/documents"), &body)
+            .await
+            .status,
+        303,
+        "HTML bytes are valid text, so the upload is accepted (as text)"
+    );
+
+    let file_id = app.state.engagements.documents(&alice, eid).await.unwrap()[0].id;
+    let served = c
+        .get(&format!("/engagements/{eid}/documents/{file_id}"))
+        .await;
+    assert_eq!(served.status, 200);
+    let ct = served.header("content-type").unwrap_or("");
+    assert!(ct.contains("text/plain"), "served as plain text, got {ct}");
+    assert!(
+        !ct.contains("text/html"),
+        "must never be served as active HTML content"
+    );
+    assert_eq!(served.header("x-content-type-options"), Some("nosniff"));
+    // The bytes are returned verbatim as data, not executed.
+    assert!(
+        served
+            .body
+            .contains("<script>alert(document.domain)</script>")
+    );
+}
+
 // --- polling helpers -------------------------------------------------------
 
 /// Poll `condition` until true or the timeout elapses.

@@ -9,8 +9,8 @@
 
 use abyssum_core::custom_request::RequestOutcome;
 use abyssum_core::{
-    CustomWordlist, Finding, Note, PacingPolicy, ScanSession, SessionStatus, Severity, Summary,
-    Tag, TagUsage, TimingProfile, User,
+    CustomWordlist, DocumentKind, Engagement, EngagementDocument, Finding, Note, PacingPolicy,
+    ScanSession, SessionStatus, Severity, Summary, Tag, TagUsage, TimingProfile, User,
 };
 use uuid::Uuid;
 
@@ -37,6 +37,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
             "<nav><span class=\"brand\">Abyssum</span>\
              <a href=\"/scan\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
+             <a href=\"/engagements\">Engagements</a>\
              <a href=\"/timing-profiles\">Timing</a>\
              <a href=\"/wordlists\">Wordlists</a>\
              <span class=\"muted\">{name}{admin}</span>\
@@ -135,6 +136,7 @@ pub fn scan_page(
     scanner_ids: &[String],
     profiles: &[TimingProfile],
     wordlists: &[CustomWordlist],
+    engagements: &[Engagement],
 ) -> String {
     let options = scanner_ids
         .iter()
@@ -181,6 +183,21 @@ pub fn scan_page(
            </select></label> \
          <a href=\"/wordlists\" class=\"muted\">Manage wordlists</a>"
     );
+    // The optional engagement selector: the conservative default (none) plus each
+    // of the operator's authorized engagements. Reference-only — the association
+    // never changes what the scan targets or how it paces.
+    let engagement_field = if engagements.is_empty() {
+        "<a href=\"/engagements\" class=\"muted\">Create an engagement</a>".to_string()
+    } else {
+        let opts = engagement_options(engagements);
+        format!(
+            "<label>Engagement (optional) \
+               <select name=\"engagement\">\
+                 <option value=\"\">— none —</option>{opts}\
+               </select></label> \
+             <a href=\"/engagements\" class=\"muted\">Manage engagements</a>"
+        )
+    };
     let body = format!(
         "<h1>Start a scan</h1>\
          <form method=\"post\" action=\"/scans\">{csrf}\
@@ -188,6 +205,7 @@ pub fn scan_page(
            <textarea name=\"targets\" rows=\"4\" cols=\"60\" required \
              placeholder=\"https://api.example.com\"></textarea></label>\
          <fieldset><legend>Scanners</legend>{options}</fieldset>\
+         <fieldset><legend>Engagement</legend>{engagement_field}</fieldset>\
          <fieldset><legend>Pacing</legend>\
            <label>Timing profile \
              <select name=\"opt.timing_profile\">\
@@ -461,7 +479,12 @@ pub fn sessions_table(sessions: &[ScanSession], viewer: &User) -> String {
 }
 
 /// The scan-detail page: live progress region + the persisted results fragment.
-pub fn scan_detail(user: &User, session: &ScanSession) -> String {
+pub fn scan_detail(
+    user: &User,
+    csrf: &str,
+    session: &ScanSession,
+    engagements: &[Engagement],
+) -> String {
     let id = session.id;
     let active = !session.status.is_terminal();
     let live = if active {
@@ -474,6 +497,7 @@ pub fn scan_detail(user: &User, session: &ScanSession) -> String {
          <p>Status: {status}</p>\
          {cancel}\
          {live}\
+         {assign}\
          <h2>Tags</h2>\
          <section hx-get=\"/scan/{id}/tags\" hx-trigger=\"load\">Loading tags…</section>\
          <h2>Notes</h2>\
@@ -484,8 +508,45 @@ pub fn scan_detail(user: &User, session: &ScanSession) -> String {
         short = &id.to_string()[..8],
         status = status_pill(session.status),
         cancel = cancel_form(user, session),
+        assign = assign_engagement_form(csrf, id, engagements),
     );
     page("Scan detail", Some(user), &body)
+}
+
+/// The "assign this scan to an engagement" form (a full-page POST). The selection
+/// is optional; a blank choice clears any existing association. With no
+/// engagements yet, it points the operator at where to create one. The association
+/// is reference-only — it never changes what the scan targets or how it paces.
+fn assign_engagement_form(csrf: &str, id: Uuid, engagements: &[Engagement]) -> String {
+    if engagements.is_empty() {
+        return "<p class=\"muted\">Assign to an engagement: \
+                <a href=\"/engagements\">create one first</a>.</p>"
+            .to_string();
+    }
+    format!(
+        "<form method=\"post\" action=\"/scan/{id}/assign\">{csrf}\
+           <label>Engagement \
+             <select name=\"engagement\">\
+               <option value=\"\">— none —</option>{opts}\
+             </select></label> \
+           <button type=\"submit\">Assign</button></form>",
+        csrf = csrf_field(csrf),
+        opts = engagement_options(engagements),
+    )
+}
+
+/// The `<option>` list of a set of engagements (value = id, label = name).
+fn engagement_options(engagements: &[Engagement]) -> String {
+    engagements
+        .iter()
+        .map(|e| {
+            format!(
+                "<option value=\"{id}\">{name}</option>",
+                id = e.id,
+                name = esc(&e.name),
+            )
+        })
+        .collect()
 }
 
 /// The cancel button (only while the scan is still running and the viewer may act).
@@ -656,6 +717,162 @@ pub fn custom_response(outcome: &RequestOutcome) -> String {
 /// A standalone error fragment (e.g. a rejected scan submission).
 pub fn error_fragment(message: &str) -> String {
     format!("<p class=\"error\">{}</p>", esc(message))
+}
+
+// --- Engagements -----------------------------------------------------------
+
+/// The engagements list page: the operator's authorized engagements plus a form to
+/// create one. Private to the authorized set (an admin sees all).
+pub fn engagements_page(user: &User, csrf: &str, engagements: &[Engagement]) -> String {
+    let rows = if engagements.is_empty() {
+        "<p class=\"muted\">No engagements yet.</p>".to_string()
+    } else {
+        let items = engagements
+            .iter()
+            .map(|e| {
+                format!(
+                    "<li><a href=\"/engagements/{id}\">{name}</a> \
+                     <span class=\"muted\">created {created} · owner #{owner}</span></li>",
+                    id = e.id,
+                    name = esc(&e.name),
+                    created = e.created_at.format("%Y-%m-%d"),
+                    owner = e.owner_user_id,
+                )
+            })
+            .collect::<String>();
+        format!("<ul class=\"engagements\">{items}</ul>")
+    };
+    let body = format!(
+        "<h1>Engagements</h1>\
+         <p class=\"muted\">Group scans under a recorded authorization. Attach the job's scope \
+           and proof of authorization for reference — the stored scope never constrains scanning. \
+           Only you (and an admin) can see your engagements.</p>\
+         <h2>Your engagements</h2>{rows}\
+         <h2>Create an engagement</h2>\
+         <form method=\"post\" action=\"/engagements\">{csrf}\
+           <label>Name <input name=\"name\" required maxlength=\"120\"></label>\
+           <button type=\"submit\">Create engagement</button></form>",
+        csrf = csrf_field(csrf),
+    );
+    page("Engagements", Some(user), &body)
+}
+
+/// One engagement's detail page: its associated scans, its attached documents
+/// (pasted text inline, a URL as a link, an uploaded PDF inline via the browser's
+/// native viewer), and forms to attach more. An optional `notice` reports a failed
+/// attach.
+pub fn engagement_detail(
+    user: &User,
+    csrf: &str,
+    engagement: &Engagement,
+    sessions: &[ScanSession],
+    documents: &[EngagementDocument],
+    notice: Option<&str>,
+) -> String {
+    let notice_html = notice
+        .map(|n| format!("<p class=\"notice\">{}</p>", esc(n)))
+        .unwrap_or_default();
+    let scans = if sessions.is_empty() {
+        "<p class=\"muted\">No scans associated yet.</p>".to_string()
+    } else {
+        sessions_table(sessions, user)
+    };
+    let docs = if documents.is_empty() {
+        "<p class=\"muted\">No documents attached yet.</p>".to_string()
+    } else {
+        documents
+            .iter()
+            .map(|d| document_view(engagement.id, d))
+            .collect::<String>()
+    };
+    let body = format!(
+        "<h1>Engagement: {name}</h1>\
+         <p class=\"muted\">created {created} · owner #{owner}</p>\
+         {notice}\
+         <h2>Scans</h2>{scans}\
+         <h2>Scope &amp; authorization documents</h2>\
+         <p class=\"muted\">Reference material only — never used to decide what a scan targets \
+           or how a scanner behaves.</p>\
+         {docs}\
+         <h2>Attach a document</h2>{forms}",
+        name = esc(&engagement.name),
+        created = engagement.created_at.format("%Y-%m-%d %H:%M"),
+        owner = engagement.owner_user_id,
+        notice = notice_html,
+        forms = attach_document_forms(csrf, engagement.id),
+    );
+    page("Engagement", Some(user), &body)
+}
+
+/// Render one attached document for reference: pasted text inline as text, a URL
+/// as a deliberate link, and an uploaded file via the safe serving endpoint — a
+/// PDF embedded inline (the browser's native viewer) plus an open link.
+fn document_view(engagement_id: i64, doc: &EngagementDocument) -> String {
+    let meta = format!(
+        "<p class=\"muted\">added by operator #{by} · {at}</p>",
+        by = doc.added_by_user_id,
+        at = doc.added_at.format("%Y-%m-%d %H:%M"),
+    );
+    let inner = match doc.kind {
+        DocumentKind::Text => format!(
+            "<pre class=\"doc-text\">{}</pre>",
+            esc(doc.content.as_deref().unwrap_or(""))
+        ),
+        DocumentKind::Url => {
+            let url = esc(doc.content.as_deref().unwrap_or(""));
+            format!(
+                "<a href=\"{url}\" rel=\"noopener noreferrer nofollow\" target=\"_blank\">{url}</a>"
+            )
+        }
+        DocumentKind::File => {
+            let src = format!("/engagements/{engagement_id}/documents/{}", doc.id);
+            let name = esc(doc.filename.as_deref().unwrap_or("document"));
+            // Only a PDF is embedded inline via the native viewer; any file also
+            // gets a plain open link (served safely from the same-origin endpoint,
+            // no external code).
+            let embed = if doc.content_type.as_deref() == Some("application/pdf") {
+                format!(
+                    "<iframe class=\"doc-pdf\" src=\"{src}\" title=\"{name}\" \
+                       width=\"100%\" height=\"600\"></iframe>"
+                )
+            } else {
+                String::new()
+            };
+            format!("{embed}<p><a href=\"{src}\">Open {name}</a></p>")
+        }
+    };
+    format!("<div class=\"doc\">{inner}{meta}</div>")
+}
+
+/// The three attach-a-document forms (pasted text, a URL, an uploaded file), each
+/// a full-page POST to the engagement's documents endpoint. The file form's chosen
+/// file is read client-side into the hidden `file_data`/`file_name` fields (see
+/// app.js), so the server handles ordinary urlencoded input — no multipart parsing.
+fn attach_document_forms(csrf: &str, engagement_id: i64) -> String {
+    let action = format!("/engagements/{engagement_id}/documents");
+    format!(
+        "<form method=\"post\" action=\"{action}\">{csrf}\
+           <input type=\"hidden\" name=\"kind\" value=\"text\">\
+           <label>Paste scope text<br>\
+             <textarea name=\"content\" rows=\"6\" cols=\"60\" required \
+               placeholder=\"In scope: *.example.com\"></textarea></label>\
+           <button type=\"submit\">Attach text</button></form>\
+         <form method=\"post\" action=\"{action}\">{csrf2}\
+           <input type=\"hidden\" name=\"kind\" value=\"url\">\
+           <label>Scope URL <input name=\"url\" type=\"url\" required \
+             placeholder=\"https://example.com/security\"></label>\
+           <button type=\"submit\">Attach URL</button></form>\
+         <form method=\"post\" action=\"{action}\">{csrf3}\
+           <input type=\"hidden\" name=\"kind\" value=\"file\">\
+           <input type=\"hidden\" name=\"file_name\">\
+           <input type=\"hidden\" name=\"file_data\">\
+           <label>Upload a PDF or .txt authorization \
+             <input type=\"file\" accept=\"application/pdf,text/plain,.pdf,.txt\" data-doc-file></label>\
+           <button type=\"submit\">Attach file</button></form>",
+        csrf = csrf_field(csrf),
+        csrf2 = csrf_field(csrf),
+        csrf3 = csrf_field(csrf),
+    )
 }
 
 // --- Annotations: notes + color tags ---------------------------------------

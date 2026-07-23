@@ -44,3 +44,25 @@
     });
   });
 })();
+
+// Engagement document upload → hidden fields. A file input marked data-doc-file
+// reads the chosen file client-side into its form's hidden file_data (a base64
+// data URL) and file_name inputs, so a binary upload (a PDF) travels as ordinary
+// urlencoded form data and the server never parses multipart. The server decodes
+// the bytes and detects the real type from them, ignoring the declared prefix.
+(function () {
+  var inputs = document.querySelectorAll("[data-doc-file]");
+  Array.prototype.forEach.call(inputs, function (input) {
+    input.addEventListener("change", function () {
+      var form = input.form;
+      var file = input.files && input.files[0];
+      if (!form || !file) return;
+      if (form.file_name) form.file_name.value = file.name;
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        if (form.file_data) form.file_data.value = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+})();

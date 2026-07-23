@@ -418,14 +418,17 @@ async fn migrations_are_idempotent_and_preserve_data() {
     // `add-seed-data`, the auth schema (0003) added by `add-authentication`
     // (users/auth_sessions + the sessions.owner_user_id column), the annotations
     // schema (0004) added by `add-annotations` (notes/tags/session_tags), and the
-    // timing-profiles schema (0005) added by `g05-add-timing-profiles`, and the
+    // timing-profiles schema (0005) added by `g05-add-timing-profiles`, the
     // custom-wordlists schema (0006) added by `g07-add-user-wordlist-upload`
-    // (user_wordlists / user_wordlist_entries). Re-opening re-applies none of them.
+    // (user_wordlists / user_wordlist_entries), and the engagements schema (0007)
+    // added by `h01-add-engagements` (engagements / engagement_operators /
+    // engagement_documents + the sessions.engagement_id association). Re-opening
+    // re-applies none of them.
     let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(applied, 6);
+    assert_eq!(applied, 7);
 }
 
 // --- 7.5 Deletion ----------------------------------------------------------

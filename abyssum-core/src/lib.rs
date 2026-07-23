@@ -22,6 +22,7 @@ pub mod config;
 pub(crate) mod csv;
 pub mod custom_request;
 pub mod diff;
+pub mod engagements;
 pub mod error;
 pub mod logging;
 pub mod persistence;
@@ -44,6 +45,10 @@ pub use custom_request::{
     SignalKind, analyze, execute as execute_custom_request, normalize_url,
 };
 pub use diff::{ChangedEntry, DiffEntry, SessionDiff, diff_sessions};
+pub use engagements::{
+    DocumentBlob, DocumentKind, Engagement, EngagementDocument, EngagementStore,
+    detect_document_type,
+};
 pub use error::{Error, Result};
 pub use persistence::{
     DEFAULT_SEARCH_LIMIT, DatabaseManager, FindingFilter, MAX_SEARCH_LIMIT, Summary,
