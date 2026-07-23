@@ -548,17 +548,25 @@ pub async fn update_timing_profile(
     }
 }
 
+/// Ceiling on a user-entered pacing delay: one day. Well beyond any realistic
+/// stealth pacing, but bounded so a finite-but-huge value (e.g. `1e300`) can never
+/// be stored and later overflow `Duration` when the profile paces its first request.
+const MAX_DELAY_SECS: f64 = 86_400.0;
+
 /// Build a [`PacingPolicy`] from the management form's `shape` + `min` + `max`
 /// fields. `organic` yields a heavy-tailed shape sized from the window; anything
-/// else a uniform window. Non-numeric or negative delays are rejected.
+/// else a uniform window. Non-numeric, negative, or out-of-range delays are rejected.
 fn policy_from_form(form: &[(String, String)]) -> Result<PacingPolicy, String> {
     let parse = |name: &str| -> Result<f64, String> {
         let raw = field(form, name).unwrap_or("").trim().to_string();
         let value: f64 = raw
             .parse()
             .map_err(|_| format!("{name} must be a number of seconds"))?;
-        if value < 0.0 || !value.is_finite() {
-            return Err(format!("{name} must be a non-negative number of seconds"));
+        // `contains` also rejects NaN and infinity (neither is in the range).
+        if !(0.0..=MAX_DELAY_SECS).contains(&value) {
+            return Err(format!(
+                "{name} must be a number of seconds between 0 and {MAX_DELAY_SECS}"
+            ));
         }
         Ok(value)
     };
@@ -1214,6 +1222,28 @@ mod tests {
         assert_eq!(options.get("timing_profile"), Some("organic"));
         assert_eq!(options.get("brute"), Some("on"));
         assert_eq!(options.get("scanners"), None);
+    }
+
+    #[test]
+    fn policy_from_form_rejects_out_of_range_delays() {
+        let form = |s: &str| parse_form(s);
+        // A sane window parses into the matching shape.
+        assert!(matches!(
+            policy_from_form(&form("shape=uniform&min=1&max=3")).unwrap(),
+            PacingPolicy::Uniform { .. }
+        ));
+        assert!(matches!(
+            policy_from_form(&form("shape=organic&min=1&max=6")).unwrap(),
+            PacingPolicy::Organic { .. }
+        ));
+        // A finite-but-huge value that would overflow Duration is rejected, not stored.
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=1e300")).is_err());
+        // Negatives and non-numbers are rejected too.
+        assert!(policy_from_form(&form("shape=uniform&min=-1&max=3")).is_err());
+        assert!(policy_from_form(&form("shape=uniform&min=x&max=3")).is_err());
+        // The ceiling itself is allowed (boundary), one past it is not.
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=86400")).is_ok());
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=86401")).is_err());
     }
 
     #[test]

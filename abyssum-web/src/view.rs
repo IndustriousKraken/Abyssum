@@ -268,9 +268,11 @@ fn shape_options(selected: &str) -> String {
         .collect()
 }
 
-/// Format a delay in seconds without a trailing `.0` on whole numbers.
+/// Format a delay in seconds without a trailing `.0` on whole numbers. A value
+/// outside `i64`'s exact range (or non-finite) falls back to the float formatter,
+/// so a huge stored delay never renders as a saturated `as i64` garbage integer.
 fn fmt_secs(secs: f64) -> String {
-    if secs.fract() == 0.0 {
+    if secs.fract() == 0.0 && secs.abs() < i64::MAX as f64 {
         format!("{}", secs as i64)
     } else {
         format!("{secs}")

@@ -186,8 +186,15 @@ impl RequestSpec {
     /// Mark this request as a support-infrastructure lookup (builder-style), so it
     /// is paced by the faster support lane rather than held to the target floor. See
     /// [`support_infrastructure`](Self::support_infrastructure).
+    ///
+    /// This also sends the request **without** the scan's credential: a public DNS
+    /// resolver, a CT / RDAP aggregator, or a passive-DNS service is a third party,
+    /// never the target, so the target's bearer token / cookie must not travel to
+    /// it. Marking the lookup here anonymizes every support query in one place
+    /// rather than relying on each call site to remember [`without_credential`](Self::without_credential).
     pub fn support_lookup(mut self) -> Self {
         self.support_infrastructure = true;
+        self.omit_credential = true;
         self
     }
 }
@@ -439,13 +446,87 @@ mod tests {
     #[test]
     fn request_spec_support_lookup_defaults_off() {
         let url = Url::parse("https://cloudflare-dns.com/dns-query").unwrap();
-        // By default a request is target traffic.
+        // By default a request is target traffic, carrying the credential.
         assert!(!RequestSpec::get(url.clone()).support_infrastructure);
-        // A discovery/mapping query to a third-party service opts into the support lane.
+        assert!(!RequestSpec::get(url.clone()).omit_credential);
+        // A discovery/mapping query to a third-party service opts into the support
+        // lane AND drops the credential, so the target's token never reaches it.
+        let spec = RequestSpec::get(url).support_lookup();
+        assert!(spec.support_infrastructure);
+        assert!(spec.omit_credential, "a support lookup must be anonymized");
+    }
+
+    /// A support-infrastructure lookup must reach the third-party service with **no**
+    /// `Authorization`/`Cookie` header even when the scan carries a credential, while
+    /// ordinary target traffic still carries it (the positive control proves the
+    /// assertion bites).
+    #[tokio::test]
+    async fn support_lookup_is_sent_without_the_scan_credential() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let heads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    sink.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf).into_owned());
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let base = Url::parse(&format!("http://{addr}/")).unwrap();
+        let c = ctx(CancellationToken::new()).with_credential(Credential {
+            bearer: Some("secret-token".into()),
+            cookie: Some("sid=abc".into()),
+        });
+
+        // Support lookup first, then a normal target request to the same host.
+        c.send(RequestSpec::get(base.clone()).support_lookup())
+            .await
+            .unwrap();
+        c.send(RequestSpec::get(base.clone())).await.unwrap();
+
+        let heads = heads.lock().unwrap();
+        assert_eq!(heads.len(), 2, "both requests reached the mock");
+        let support = heads[0].to_ascii_lowercase();
         assert!(
-            RequestSpec::get(url)
-                .support_lookup()
-                .support_infrastructure
+            !support.contains("authorization:"),
+            "support lookup leaked a bearer token: {}",
+            heads[0]
+        );
+        assert!(
+            !support.contains("cookie:"),
+            "support lookup leaked a cookie: {}",
+            heads[0]
+        );
+        let normal = heads[1].to_ascii_lowercase();
+        assert!(
+            normal.contains("authorization:") && normal.contains("cookie:"),
+            "the credential must still reach target traffic: {}",
+            heads[1]
         );
     }
 

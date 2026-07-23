@@ -225,7 +225,7 @@ impl PacingPolicy {
             PacingPolicy::Uniform { min_secs, .. } => min_secs,
             PacingPolicy::Organic { min_secs, .. } => min_secs,
         };
-        Duration::from_secs_f64(secs.max(0.0))
+        secs_to_duration(secs)
     }
 
     /// Draw a fresh base delay from this policy.
@@ -235,8 +235,9 @@ impl PacingPolicy {
             PacingPolicy::Uniform { min_secs, max_secs } => {
                 let min = min_secs.max(0.0);
                 let max = max_secs.max(min);
-                if max <= min {
-                    // Zero-width window: exactly the floor.
+                if max <= min || !max.is_finite() {
+                    // Zero-width window, or a non-finite bound from a corrupt stored
+                    // policy: exactly the floor, so `gen_range` never sees a bad range.
                     min
                 } else {
                     // Inclusive range so the draw matches the documented `[min, max]`
@@ -259,7 +260,7 @@ impl PacingPolicy {
                     // typical spread, breaking any constant-rate / volume-per-window
                     // signature.
                     let top = long_pause_secs.max(max);
-                    if top <= max {
+                    if top <= max || !top.is_finite() {
                         max
                     } else {
                         rng.gen_range(max..=top)
@@ -276,8 +277,18 @@ impl PacingPolicy {
                 }
             }
         };
-        Duration::from_secs_f64(secs.max(0.0))
+        secs_to_duration(secs)
     }
+}
+
+/// Convert a seconds value to a [`Duration`] without ever panicking: negatives and
+/// `NaN` clamp to zero, and a value too large for `Duration` (or infinite) saturates
+/// at [`Duration::MAX`]. `Duration::from_secs_f64` panics on both overflow and
+/// non-finite input, so a policy persisted with an extreme value could otherwise
+/// crash the scan task the first time it paces — this makes the limiter robust to a
+/// stored policy regardless of its source.
+fn secs_to_duration(secs: f64) -> Duration {
+    Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(Duration::MAX)
 }
 
 struct Inner {
@@ -902,6 +913,41 @@ mod tests {
             support_total * 4 < target_total,
             "support phase ({support_total:?}) should be far faster than {N} target probes ({target_total:?})"
         );
+    }
+
+    // A policy carrying extreme or non-finite values (e.g. a corrupt stored row)
+    // must clamp rather than panic the limiter — `floor`/`sample` are hardened so a
+    // policy can never overflow `Duration` regardless of where it came from.
+    #[test]
+    fn extreme_policy_values_clamp_instead_of_panicking() {
+        // Values that overflow `Duration::from_secs_f64` (which would panic).
+        let huge = PacingPolicy::Uniform {
+            min_secs: 1e300,
+            max_secs: 2e300,
+        };
+        assert_eq!(huge.floor(), Duration::MAX);
+        assert_eq!(huge.sample(), Duration::MAX);
+
+        // Organic with an infinite long-pause bound: must not reach `gen_range` with
+        // a non-finite range, and must clamp on conversion.
+        let organic = PacingPolicy::Organic {
+            min_secs: 1e300,
+            median_secs: 1e300,
+            max_secs: 1e300,
+            long_pause_prob: 1.0,
+            long_pause_secs: f64::INFINITY,
+        };
+        for _ in 0..20 {
+            assert_eq!(organic.sample(), Duration::MAX);
+        }
+
+        // Fully non-finite fields clamp to the ceiling as well.
+        let inf = PacingPolicy::Uniform {
+            min_secs: f64::INFINITY,
+            max_secs: f64::INFINITY,
+        };
+        assert_eq!(inf.floor(), Duration::MAX);
+        assert_eq!(inf.sample(), Duration::MAX);
     }
 
     // --- g05: timing profiles (per-scan pacing policy) -------------------------
