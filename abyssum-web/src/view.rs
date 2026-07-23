@@ -761,11 +761,14 @@ pub fn engagements_page(user: &User, csrf: &str, engagements: &[Engagement]) -> 
 /// (pasted text inline, a URL as a link, an uploaded PDF inline via the browser's
 /// native viewer), and forms to attach more. An optional `notice` reports a failed
 /// attach.
+#[allow(clippy::too_many_arguments)]
 pub fn engagement_detail(
     user: &User,
     csrf: &str,
     engagement: &Engagement,
     sessions: &[ScanSession],
+    rollup: &Summary,
+    rollup_findings: &[Finding],
     documents: &[EngagementDocument],
     notice: Option<&str>,
 ) -> String {
@@ -777,6 +780,10 @@ pub fn engagement_detail(
     } else {
         sessions_table(sessions, user)
     };
+    // Results rollup: the severity breakdown plus the findings aggregated across
+    // the engagement's sessions the operator may see (findings span sessions, so
+    // no per-finding session action — `None`, like the dashboard search list).
+    let rollup_html = format!("{}{}", stats(rollup), findings(rollup_findings, None));
     let docs = if documents.is_empty() {
         "<p class=\"muted\">No documents attached yet.</p>".to_string()
     } else {
@@ -789,6 +796,9 @@ pub fn engagement_detail(
         "<h1>Engagement: {name}</h1>\
          <p class=\"muted\">created {created} · owner #{owner}</p>\
          {notice}\
+         <h2>Results rollup</h2>\
+         <p class=\"muted\">Findings across this engagement's scans you can see.</p>\
+         {rollup}\
          <h2>Scans</h2>{scans}\
          <h2>Scope &amp; authorization documents</h2>\
          <p class=\"muted\">Reference material only — never used to decide what a scan targets \
@@ -799,6 +809,7 @@ pub fn engagement_detail(
         created = engagement.created_at.format("%Y-%m-%d %H:%M"),
         owner = engagement.owner_user_id,
         notice = notice_html,
+        rollup = rollup_html,
         forms = attach_document_forms(csrf, engagement.id),
     );
     page("Engagement", Some(user), &body)

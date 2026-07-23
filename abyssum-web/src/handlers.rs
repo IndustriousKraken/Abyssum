@@ -913,6 +913,29 @@ async fn render_engagement_detail(
         .sessions_for_engagement(user, id)
         .await
         .unwrap_or_default();
+    // Rollup scope: the engagement's sessions the operator may already see under
+    // per-user visibility (admin sees all; a non-admin only their own). This bounds
+    // the rollup to what the operator could otherwise view — an admin-assigned
+    // session owned by another operator is excluded for a non-admin.
+    let rollup_ids: Vec<Uuid> = sessions
+        .iter()
+        .filter(|s| user.is_admin() || s.owner_user_id == Some(user.id))
+        .map(|s| s.id)
+        .collect();
+    // Severity breakdown via the existing subset-restricted Summary Counts.
+    let rollup = state
+        .db
+        .summary(Some(&rollup_ids))
+        .await
+        .unwrap_or_else(|_| abyssum_core::Summary::empty());
+    // The findings across those sessions (persisted). ponytail: per-session fetch;
+    // a batched query is an optimization to add if engagements ever hold many scans.
+    let mut rollup_findings = Vec::new();
+    for sid in &rollup_ids {
+        if let Ok(mut fs) = state.db.get_findings(*sid).await {
+            rollup_findings.append(&mut fs);
+        }
+    }
     let documents = state
         .engagements
         .documents(user, id)
@@ -924,6 +947,8 @@ async fn render_engagement_detail(
             &csrf,
             &engagement,
             &sessions,
+            &rollup,
+            &rollup_findings,
             &documents,
             notice.as_deref(),
         ),

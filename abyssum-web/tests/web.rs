@@ -1076,6 +1076,184 @@ async fn engagement_visibility_is_owner_only_with_admin_override() {
     );
 }
 
+/// The engagement rollup counts and findings cover exactly the engagement's
+/// sessions — a session in another engagement and an unassociated one are excluded.
+#[tokio::test]
+async fn engagement_rollup_scopes_to_the_engagements_sessions() {
+    let app = TestApp::spawn().await;
+    let alice = make_user(&app, "alice").await; // first → admin, sole operator here
+    let mut c = authed_client(&app, "alice").await;
+
+    let eid = create_engagement(&mut c, "In scope").await;
+    let other = create_engagement(&mut c, "Other engagement").await;
+
+    // One session in the engagement (counts), one in another engagement, and one
+    // unassociated (neither counts). Distinct titles isolate the rollup findings.
+    let in_scope = seed_session(
+        &app,
+        alice.id,
+        "https://in.example",
+        &[finding(
+            "cors",
+            "https://in.example",
+            Severity::High,
+            Status::Vulnerable,
+            "InScopeFinding",
+            "d",
+        )],
+    )
+    .await;
+    let other_sid = seed_session(
+        &app,
+        alice.id,
+        "https://other.example",
+        &[finding(
+            "cors",
+            "https://other.example",
+            Severity::Critical,
+            Status::Vulnerable,
+            "OtherEngagementFinding",
+            "d",
+        )],
+    )
+    .await;
+    seed_session(
+        &app,
+        alice.id,
+        "https://free.example",
+        &[finding(
+            "cors",
+            "https://free.example",
+            Severity::Low,
+            Status::Vulnerable,
+            "UnassociatedFinding",
+            "d",
+        )],
+    )
+    .await;
+
+    app.state
+        .engagements
+        .assign_session(&alice, Some(eid), in_scope)
+        .await
+        .unwrap();
+    app.state
+        .engagements
+        .assign_session(&alice, Some(other), other_sid)
+        .await
+        .unwrap();
+
+    let detail = c.get(&format!("/engagements/{eid}")).await;
+    assert_eq!(detail.status, 200);
+    assert!(
+        detail.body.contains("InScopeFinding"),
+        "the engagement's own finding is in the rollup"
+    );
+    assert!(
+        !detail.body.contains("OtherEngagementFinding"),
+        "another engagement's finding is excluded"
+    );
+    assert!(
+        !detail.body.contains("UnassociatedFinding"),
+        "an unassociated session's finding is excluded"
+    );
+    // The severity breakdown counts exactly the one in-scope session and finding.
+    assert!(
+        detail.body.contains("<strong>1</strong><br>sessions"),
+        "rollup counts one session"
+    );
+    assert!(
+        detail.body.contains("<strong>1</strong><br>findings"),
+        "rollup counts one finding"
+    );
+}
+
+/// The rollup follows per-user session visibility: a non-admin's rollup omits an
+/// engagement-associated session owned by another operator, while an admin viewing
+/// the same engagement sees all of its sessions.
+#[tokio::test]
+async fn engagement_rollup_respects_per_user_session_visibility() {
+    let app = TestApp::spawn().await;
+    let admin = make_user(&app, "admin").await; // first → admin
+    let alice = make_user(&app, "alice").await;
+    let bob = make_user(&app, "bob").await;
+
+    let mut alice_c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut alice_c, "shared engagement").await;
+
+    // Alice's own session in her engagement.
+    let alice_sid = seed_session(
+        &app,
+        alice.id,
+        "https://alice.example",
+        &[finding(
+            "cors",
+            "https://alice.example",
+            Severity::Medium,
+            Status::Vulnerable,
+            "AliceFinding",
+            "d",
+        )],
+    )
+    .await;
+    app.state
+        .engagements
+        .assign_session(&alice, Some(eid), alice_sid)
+        .await
+        .unwrap();
+
+    // An admin associates a session Bob owns with Alice's engagement.
+    let bob_sid = seed_session(
+        &app,
+        bob.id,
+        "https://bob.example",
+        &[finding(
+            "cors",
+            "https://bob.example",
+            Severity::Critical,
+            Status::Vulnerable,
+            "BobFinding",
+            "d",
+        )],
+    )
+    .await;
+    app.state
+        .engagements
+        .assign_session(&admin, Some(eid), bob_sid)
+        .await
+        .unwrap();
+
+    // Alice (non-admin) sees only her own finding in the rollup, never Bob's, and
+    // her rollup counts one session — not the two the engagement holds.
+    let detail = alice_c.get(&format!("/engagements/{eid}")).await;
+    assert_eq!(detail.status, 200);
+    assert!(
+        detail.body.contains("AliceFinding"),
+        "alice's finding is in her rollup"
+    );
+    assert!(
+        !detail.body.contains("BobFinding"),
+        "bob's finding is not disclosed to alice via the rollup"
+    );
+    assert!(
+        detail.body.contains("<strong>1</strong><br>sessions"),
+        "alice's rollup counts only her session"
+    );
+
+    // The admin, viewing the same engagement, sees both sessions in the rollup.
+    let mut admin_c = authed_client(&app, "admin").await;
+    let detail = admin_c.get(&format!("/engagements/{eid}")).await;
+    assert_eq!(detail.status, 200);
+    assert!(
+        detail.body.contains("AliceFinding") && detail.body.contains("BobFinding"),
+        "admin's rollup includes every associated session's findings"
+    );
+    assert!(
+        detail.body.contains("<strong>2</strong><br>sessions"),
+        "admin's rollup counts both sessions"
+    );
+}
+
 /// The start-scan form offers an engagement selector, and choosing one associates
 /// the created scan with it — while the scan still runs unchanged.
 #[tokio::test]
