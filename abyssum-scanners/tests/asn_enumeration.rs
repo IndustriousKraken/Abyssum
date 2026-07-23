@@ -3,8 +3,8 @@
 //! Every test runs against hand-rolled, in-process mock HTTP servers bound to
 //! random localhost ports — **no real network, no external deps, no real DNS**.
 //! The registration-data source is a local mock that answers the IP-to-ASN lookup
-//! (`/ip/<ip>`) and the ASN-prefixes lookup (`/asn/<asn>/prefixes`) with stubbed
-//! RDAP-style JSON; domain resolution is a local DoH mock. This proves the full
+//! (`prefix-overview`) and the ASN-prefixes lookup (`announced-prefixes`) with
+//! stubbed RIPEstat-style JSON; domain resolution is a local DoH mock. This proves the full
 //! flow (resolve → look up ASN → enumerate netblocks → report) without touching a
 //! real registry, and that only those registration-data queries are issued — the
 //! enumerated ranges are never contacted (no routing/scan action).
@@ -32,10 +32,10 @@ struct Mock {
     requests: Arc<Mutex<Vec<String>>>,
 }
 
-/// Start a registration-data source mock: it answers `/asn/…` requests with
-/// `asn_body` and every other request (the `/ip/…` lookup) with `ip_body`, so one
-/// server serves both stages and tests can assert both queries were made. A DoH
-/// mock is just a source mock whose bodies are the same DNS JSON.
+/// Start a registration-data source mock: it answers `announced-prefixes` requests
+/// with `asn_body` and every other request (the `prefix-overview` lookup) with
+/// `ip_body`, so one server serves both stages and tests can assert both queries
+/// were made. A DoH mock is just a source mock whose bodies are the same DNS JSON.
 async fn start_mock(ip_body: &'static str, asn_body: &'static str) -> Mock {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let authority = listener.local_addr().unwrap().to_string();
@@ -74,9 +74,9 @@ async fn handle_conn(
     requests: Arc<Mutex<Vec<String>>>,
 ) {
     let head = read_request_head(&mut sock).await.unwrap_or_default();
-    // Route by path: the ASN-prefixes stage hits `/asn/<n>/prefixes`; everything
-    // else is the `/ip/<ip>` lookup (or the DoH query).
-    let body = if head.contains("/asn/") {
+    // Route by path: the ASN-prefixes stage hits `announced-prefixes`; everything
+    // else is the `prefix-overview` IP lookup (or the DoH query).
+    let body = if head.contains("announced-prefixes") {
         asn_body
     } else {
         ip_body
@@ -123,27 +123,29 @@ fn ctx() -> ScanContext {
     )
 }
 
-/// Stubbed RDAP-style IP-to-ASN lookup: 8.8.8.8 belongs to AS15169 (Google LLC).
+/// Stubbed RIPEstat `prefix-overview` IP-to-ASN lookup: 8.8.8.8 belongs to AS15169
+/// (holder "GOOGLE, US"), covered by 8.8.8.0/24.
 const IP_LOOKUP: &str = r#"{
     "status": "ok",
     "data": {
-        "prefixes": [
-            {"prefix": "8.8.8.0/24", "asn": {"asn": 15169, "name": "GOOGLE", "description": "Google LLC"}}
-        ]
+        "announced": true,
+        "asns": [ {"asn": 15169, "holder": "GOOGLE, US"} ],
+        "resource": "8.8.8.0/24",
+        "type": "prefix"
     }
 }"#;
 
-/// Stubbed ASN-prefixes response: three announced netblocks for AS15169.
+/// Stubbed RIPEstat `announced-prefixes` response: three announced netblocks (v4 +
+/// v6 in one `prefixes` array) for AS15169.
 const ASN_PREFIXES: &str = r#"{
     "status": "ok",
     "data": {
-        "ipv4_prefixes": [
-            {"prefix": "8.8.8.0/24"},
-            {"prefix": "8.8.4.0/24"}
+        "prefixes": [
+            {"prefix": "8.8.8.0/24", "timelines": []},
+            {"prefix": "8.8.4.0/24", "timelines": []},
+            {"prefix": "2001:4860::/32", "timelines": []}
         ],
-        "ipv6_prefixes": [
-            {"prefix": "2001:4860::/32"}
-        ]
+        "resource": "15169"
     }
 }"#;
 
@@ -188,10 +190,10 @@ async fn stubbed_rdap_yields_asn_and_netblocks_no_routing_action() {
     assert_eq!(asn.status, Status::Info);
     assert_eq!(asn.severity, Severity::Info);
     assert!(asn.title.contains("AS15169"));
-    assert!(asn.title.contains("Google LLC"));
+    assert!(asn.title.contains("GOOGLE, US"));
     let ev = asn.evidence.as_ref().unwrap();
     assert_eq!(ev["asn"], 15169);
-    assert_eq!(ev["organization"], "Google LLC");
+    assert_eq!(ev["organization"], "GOOGLE, US");
     assert_eq!(ev["resolved_ip"], "8.8.8.8");
 
     // Every enumerated netblock is reported, each naming the ASN + organization.
@@ -201,7 +203,7 @@ async fn stubbed_rdap_yields_asn_and_netblocks_no_routing_action() {
             .find(|f| f.evidence.as_ref().and_then(|e| e["netblock"].as_str()) == Some(cidr))
             .unwrap_or_else(|| panic!("netblock {cidr} is reported"));
         assert!(nb.title.contains("AS15169"));
-        assert_eq!(nb.evidence.as_ref().unwrap()["organization"], "Google LLC");
+        assert_eq!(nb.evidence.as_ref().unwrap()["organization"], "GOOGLE, US");
     }
 
     // The source was queried exactly twice: the IP lookup and the ASN prefixes —
@@ -213,13 +215,15 @@ async fn stubbed_rdap_yields_asn_and_netblocks_no_routing_action() {
         "only the IP lookup and the ASN-prefixes query are issued: {source_requests:#?}"
     );
     assert!(
-        source_requests.iter().any(|r| r.contains("/ip/8.8.8.8")),
+        source_requests
+            .iter()
+            .any(|r| r.contains("prefix-overview") && r.contains("resource=8.8.8.8")),
         "the resolved IP was looked up: {source_requests:#?}"
     );
     assert!(
         source_requests
             .iter()
-            .any(|r| r.contains("/asn/15169/prefixes")),
+            .any(|r| r.contains("announced-prefixes") && r.contains("resource=AS15169")),
         "the ASN's prefixes were enumerated: {source_requests:#?}"
     );
     // Both source queries went through the paced send path (rotating User-Agent).
@@ -262,7 +266,7 @@ async fn ip_literal_target_skips_doh() {
             .lock()
             .unwrap()
             .iter()
-            .any(|r| r.contains("/ip/8.8.8.8")),
+            .any(|r| r.contains("prefix-overview") && r.contains("resource=8.8.8.8")),
         "the IP literal was looked up directly"
     );
 }

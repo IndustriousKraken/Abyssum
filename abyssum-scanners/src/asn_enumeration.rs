@@ -50,12 +50,18 @@ use abyssum_core::{
 /// must never change.
 const ID: &str = "asn_enumeration";
 
-/// Default registration-data source: a public aggregator of RIR (RDAP/WHOIS) and
-/// routing data exposed as HTTP/JSON, so it reuses the engine's paced request path
-/// with no new dependency. `{base}ip/<ip>` returns the owning org + ASN + covering
-/// prefix for an address; `{base}asn/<asn>/prefixes` returns the ASN's announced
+/// Default registration-data source: RIPEstat, RIPE NCC's maintained, official data
+/// API aggregating registration (RDAP/WHOIS) and routing data as HTTP/JSON, so it
+/// reuses the engine's paced request path with no new dependency.
+/// `{base}prefix-overview/data.json?resource=<ip>` returns the announcing ASN, its
+/// holder (owning org), and the covering prefix for an address;
+/// `{base}announced-prefixes/data.json?resource=AS<asn>` returns the ASN's announced
 /// netblocks. The trailing slash matters: source URLs are built with [`Url::join`].
-const SOURCE_BASE: &str = "https://api.bgpview.io/";
+///
+/// (Was `api.bgpview.io`, a third-party aggregator that has since gone dead —
+/// NXDOMAIN — silently turning every scan into "no findings"; RIPEstat is a durable
+/// first-party replacement covering both lookups the scanner needs.)
+const SOURCE_BASE: &str = "https://stat.ripe.net/data/";
 
 /// Default DNS-over-HTTPS resolver (JSON API), shared with the subdomain
 /// brute-force path. A domain target is resolved with `{base}?name=<host>&type=A`
@@ -230,7 +236,7 @@ impl AsnEnumerationScanner {
     /// body with no ASN yields `None` (logged) rather than failing the scan —
     /// enumeration is best-effort; cancellation propagates.
     async fn lookup_asn(&self, ip: &str, ctx: &ScanContext) -> Result<Option<IpAsnInfo>> {
-        let Some(url) = self.source_base.join(&format!("ip/{ip}")).ok() else {
+        let Some(url) = source_url(&self.source_base, "prefix-overview/data.json", ip) else {
             return Ok(None);
         };
         match probe(ctx, RequestSpec::get(url)).await {
@@ -263,7 +269,11 @@ impl AsnEnumerationScanner {
     /// through the paced request path. A non-2xx, transport failure, or an
     /// unparseable body yields no netblocks (logged); cancellation propagates.
     async fn lookup_netblocks(&self, asn: u64, ctx: &ScanContext) -> Result<Vec<String>> {
-        let Some(url) = self.source_base.join(&format!("asn/{asn}/prefixes")).ok() else {
+        let Some(url) = source_url(
+            &self.source_base,
+            "announced-prefixes/data.json",
+            &format!("AS{asn}"),
+        ) else {
             return Ok(Vec::new());
         };
         match probe(ctx, RequestSpec::get(url)).await {
@@ -317,33 +327,48 @@ struct ProbeResponse {
     body: Vec<u8>,
 }
 
-/// Parse an IP-lookup response into the owning ASN + organization. The source
-/// returns `data.prefixes[]`, each with the covering `prefix` and an `asn`
-/// (`{ asn, name, description }`); the first prefix carrying an ASN wins. The
-/// organization is the ASN's `description`, falling back to `name`, then a
-/// placeholder. `None` when no prefix carries an ASN (unparseable, or the IP is
-/// unannounced).
+/// Build a RIPEstat data-call URL: `{base}{path}?resource=<resource>`. `base` ends
+/// in `/`, so `path` (e.g. `prefix-overview/data.json`) joins relative to it. `None`
+/// only if a misconfigured base makes the join fail.
+fn source_url(base: &Url, path: &str, resource: &str) -> Option<Url> {
+    let mut url = base.join(path).ok()?;
+    url.query_pairs_mut().append_pair("resource", resource);
+    Some(url)
+}
+
+/// An ASN from RIPEstat, which reports it as a JSON number on some data calls and a
+/// numeric string on others; accept either.
+fn json_asn(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Parse a RIPEstat `prefix-overview` response into the owning ASN + organization.
+/// The data call returns `data.asns[]` (each `{ asn, holder }`) for the address's
+/// covering prefix, reported as `data.resource`; the first entry carrying an ASN
+/// wins, and its `holder` is the owning organization (a placeholder when absent).
+/// `None` when no entry carries an ASN (unparseable, or the IP is unannounced).
 fn parse_ip_lookup(body: &[u8]) -> Option<IpAsnInfo> {
     let value: Value = serde_json::from_slice(body).ok()?;
-    let prefixes = value.get("data")?.get("prefixes")?.as_array()?;
-    for prefix in prefixes {
-        let asn_obj = match prefix.get("asn") {
-            Some(obj) => obj,
-            None => continue,
-        };
-        let Some(asn) = asn_obj.get("asn").and_then(Value::as_u64) else {
+    let data = value.get("data")?;
+    let asns = data.get("asns")?.as_array()?;
+    for entry in asns {
+        let Some(asn) = entry.get("asn").and_then(json_asn) else {
             continue;
         };
-        let organization = asn_obj
-            .get("description")
+        let organization = entry
+            .get("holder")
             .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| asn_obj.get("name").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| "unknown organization".to_string());
-        let covering_prefix = prefix
-            .get("prefix")
+        let covering_prefix = data
+            .get("resource")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string);
         return Some(IpAsnInfo {
             asn,
@@ -354,29 +379,28 @@ fn parse_ip_lookup(body: &[u8]) -> Option<IpAsnInfo> {
     None
 }
 
-/// Parse an ASN-prefixes response into the announced netblocks. The source returns
-/// `data.ipv4_prefixes[]` and `data.ipv6_prefixes[]`, each entry carrying a
-/// `prefix` (CIDR). Both families are collected, deduplicated in first-seen order.
-/// An unparseable body yields an empty list.
+/// Parse a RIPEstat `announced-prefixes` response into the announced netblocks. The
+/// data call returns `data.prefixes[]`, each entry carrying a `prefix` (CIDR); both
+/// IPv4 and IPv6 prefixes share the one array. They are collected, deduplicated in
+/// first-seen order. An unparseable body yields an empty list.
 fn parse_asn_prefixes(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
     };
-    let Some(data) = value.get("data") else {
+    let Some(entries) = value
+        .get("data")
+        .and_then(|d| d.get("prefixes"))
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for key in ["ipv4_prefixes", "ipv6_prefixes"] {
-        let Some(entries) = data.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for entry in entries {
-            if let Some(prefix) = entry.get("prefix").and_then(Value::as_str) {
-                let prefix = prefix.trim();
-                if !prefix.is_empty() && seen.insert(prefix.to_string()) {
-                    out.push(prefix.to_string());
-                }
+    for entry in entries {
+        if let Some(prefix) = entry.get("prefix").and_then(Value::as_str) {
+            let prefix = prefix.trim();
+            if !prefix.is_empty() && seen.insert(prefix.to_string()) {
+                out.push(prefix.to_string());
             }
         }
     }
@@ -591,46 +615,67 @@ mod tests {
         ));
     }
 
+    // --- Source URL construction against the real default base -----------------
+
+    #[test]
+    fn source_urls_target_ripestat_data_calls() {
+        let base = Url::parse(SOURCE_BASE).unwrap();
+        let ip = source_url(&base, "prefix-overview/data.json", "8.8.8.8").unwrap();
+        assert_eq!(
+            ip.as_str(),
+            "https://stat.ripe.net/data/prefix-overview/data.json?resource=8.8.8.8"
+        );
+        let asn = source_url(&base, "announced-prefixes/data.json", "AS15169").unwrap();
+        assert_eq!(
+            asn.as_str(),
+            "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS15169"
+        );
+    }
+
     // --- IP-to-ASN parsing (task 1) --------------------------------------------
 
     #[test]
     fn parses_asn_and_org_from_ip_lookup() {
+        // A captured RIPEstat `prefix-overview` response for 8.8.8.8 (trimmed).
         let body = br#"{
             "status": "ok",
             "data": {
-                "prefixes": [
-                    {"prefix": "8.8.8.0/24", "asn": {"asn": 15169, "name": "GOOGLE", "description": "Google LLC"}}
-                ]
+                "announced": true,
+                "asns": [ {"asn": 15169, "holder": "GOOGLE, US"} ],
+                "resource": "8.8.8.0/24",
+                "type": "prefix"
             }
         }"#;
         let got = parse_ip_lookup(body).expect("an ASN is parsed");
         assert_eq!(got.asn, 15169);
-        assert_eq!(got.organization, "Google LLC");
+        assert_eq!(got.organization, "GOOGLE, US");
         assert_eq!(got.covering_prefix.as_deref(), Some("8.8.8.0/24"));
     }
 
     #[test]
-    fn ip_lookup_falls_back_to_name_and_skips_prefixes_without_asn() {
-        // First prefix carries no ASN; the second does, with only a name.
+    fn ip_lookup_placeholder_org_and_skips_entries_without_asn() {
+        // First entry carries no ASN; the second does, with an empty holder — the
+        // owning org falls back to a placeholder, and the ASN may be a string.
         let body = br#"{
             "data": {
-                "prefixes": [
-                    {"prefix": "1.0.0.0/8"},
-                    {"prefix": "9.9.9.0/24", "asn": {"asn": 19281, "name": "QUAD9", "description": ""}}
-                ]
+                "asns": [
+                    {"holder": "SOME, XX"},
+                    {"asn": "19281", "holder": "  "}
+                ],
+                "resource": "9.9.9.0/24"
             }
         }"#;
-        let got = parse_ip_lookup(body).expect("the second prefix's ASN is used");
+        let got = parse_ip_lookup(body).expect("the second entry's ASN is used");
         assert_eq!(got.asn, 19281);
-        // Empty description falls back to the name.
-        assert_eq!(got.organization, "QUAD9");
+        assert_eq!(got.organization, "unknown organization");
         assert_eq!(got.covering_prefix.as_deref(), Some("9.9.9.0/24"));
     }
 
     #[test]
     fn ip_lookup_tolerates_garbage_and_empty() {
         assert!(parse_ip_lookup(b"not json").is_none());
-        assert!(parse_ip_lookup(br#"{"data":{"prefixes":[]}}"#).is_none());
+        // Unannounced IP: RIPEstat returns an empty `asns` array.
+        assert!(parse_ip_lookup(br#"{"data":{"asns":[]}}"#).is_none());
         assert!(parse_ip_lookup(br#"{"data":{}}"#).is_none());
     }
 
@@ -638,16 +683,17 @@ mod tests {
 
     #[test]
     fn parses_v4_and_v6_prefixes_dedup_in_order() {
+        // A captured RIPEstat `announced-prefixes` response (trimmed): v4 and v6
+        // share one `prefixes` array, each entry with a `prefix` + `timelines`.
         let body = br#"{
             "data": {
-                "ipv4_prefixes": [
-                    {"prefix": "8.8.8.0/24"},
-                    {"prefix": "8.8.4.0/24"},
-                    {"prefix": "8.8.8.0/24"}
+                "prefixes": [
+                    {"prefix": "8.8.8.0/24", "timelines": [{"starttime": "2020-01-01T00:00:00"}]},
+                    {"prefix": "8.8.4.0/24", "timelines": []},
+                    {"prefix": "8.8.8.0/24", "timelines": []},
+                    {"prefix": "2001:4860::/32", "timelines": []}
                 ],
-                "ipv6_prefixes": [
-                    {"prefix": "2001:4860::/32"}
-                ]
+                "resource": "15169"
             }
         }"#;
         let got = parse_asn_prefixes(body);

@@ -35,10 +35,10 @@ support-infrastructure lane once `g04-add-infrastructure-pacing-lane` lands.
 
 ## Tasks
 
-- [ ] Point the ASN registration-data source at a maintained endpoint (RDAP and/or RIPEstat);
+- [x] Point the ASN registration-data source at a maintained endpoint (RDAP and/or RIPEstat);
       update the response parsing to that source's shape.
-- [ ] Confirm IP→ASN→netblocks works end to end against a known target (e.g. `8.8.8.8` →
+- [x] Confirm IP→ASN→netblocks works end to end against a known target (e.g. `8.8.8.8` →
       AS15169 with Google's prefixes).
-- [ ] Keep the source base configurable and the scope-line (enumeration only, no BGP action)
+- [x] Keep the source base configurable and the scope-line (enumeration only, no BGP action)
       intact.
-- [ ] Test the parser against a captured sample of the chosen source's response.
+- [x] Test the parser against a captured sample of the chosen source's response.
