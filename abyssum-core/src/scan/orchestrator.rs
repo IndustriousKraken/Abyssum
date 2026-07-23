@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 use crate::rate_limiter::RateLimiter;
 
 use super::context::{Credential, ScanContext, UserAgentSource, build_engine_http_client};
+use super::options::ScanOptions;
 use super::progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 use super::registry::ScannerRegistry;
 use super::session::{ScanSession, SessionStatus};
@@ -186,13 +187,28 @@ impl Orchestrator {
         targets: Vec<Target>,
         scanner_ids: Vec<String>,
     ) -> Result<SessionHandle> {
+        self.create_session_with_options(targets, scanner_ids, ScanOptions::default())
+    }
+
+    /// Create a `Pending` session started with `options`, otherwise identical to
+    /// [`create_session`](Orchestrator::create_session): every requested id is
+    /// validated up front, and the options are recorded on the session so the
+    /// orchestrator can expose them to scanners through the scan context during the
+    /// run. Passing [`ScanOptions::default`] (an empty set) is exactly equivalent to
+    /// starting a scan before per-scan options existed — defaults apply.
+    pub fn create_session_with_options(
+        &self,
+        targets: Vec<Target>,
+        scanner_ids: Vec<String>,
+        options: ScanOptions,
+    ) -> Result<SessionHandle> {
         for id in &scanner_ids {
             if !self.registry.contains(id) {
                 return Err(Error::ScannerNotFound(id.clone()));
             }
         }
 
-        let session = ScanSession::new(targets, scanner_ids);
+        let session = ScanSession::new(targets, scanner_ids).with_options(options);
         let id = session.id;
         let handle: SessionHandle = Arc::new(Mutex::new(session));
         self.active.lock().unwrap().insert(
@@ -246,14 +262,19 @@ impl Orchestrator {
             armed: true,
         };
 
-        // Snapshot the plan and mark Running.
-        let (scanner_ids, targets) = {
+        // Snapshot the plan and mark Running. The scan's options are shared by `Arc`
+        // so every per-unit context clones them cheaply and reads the same set.
+        let (scanner_ids, targets, options) = {
             let mut s = session.lock().unwrap();
             s.status = SessionStatus::Running;
             s.started_at = Some(Utc::now());
             s.completed_units = 0;
             s.total_units = s.scanner_ids.len().saturating_mul(s.targets.len());
-            (s.scanner_ids.clone(), s.targets.clone())
+            (
+                s.scanner_ids.clone(),
+                s.targets.clone(),
+                Arc::new(s.options.clone()),
+            )
         };
 
         let fanout = self.build_fanout(progress);
@@ -281,7 +302,7 @@ impl Orchestrator {
                     break 'outer;
                 }
 
-                let ctx = self.context_for(&cancel, &fanout);
+                let ctx = self.context_for(&cancel, &fanout, &options);
 
                 // Race the scan against cancellation: a long-awaiting scan unwinds
                 // promptly when the token fires (the scan future is dropped).
@@ -368,7 +389,12 @@ impl Orchestrator {
     /// Build the scan context for one unit, wired to the cancellation token, the
     /// shared limiter and HTTP client, the User-Agent source, the fan-out progress
     /// callback, and any configured credential.
-    fn context_for(&self, cancel: &CancellationToken, fanout: &ProgressCallback) -> ScanContext {
+    fn context_for(
+        &self,
+        cancel: &CancellationToken,
+        fanout: &ProgressCallback,
+        options: &Arc<ScanOptions>,
+    ) -> ScanContext {
         let ctx = ScanContext::new(
             self.config.clone(),
             self.rate_limiter.clone(),
@@ -376,7 +402,8 @@ impl Orchestrator {
             cancel.clone(),
         )
         .with_http_client(self.http.clone())
-        .with_progress(fanout.clone());
+        .with_progress(fanout.clone())
+        .with_options(options.clone());
         match &self.credential {
             Some(credential) => ctx.with_credential(credential.clone()),
             None => ctx,
