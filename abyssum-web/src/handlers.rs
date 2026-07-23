@@ -1491,8 +1491,13 @@ fn with_status(status: StatusCode, mut resp: Response) -> Response {
 }
 
 /// Strip the `Error` variant's prefix so the user sees the message, not the
-/// Rust error category.
+/// Rust error category. A storage failure is redacted to a generic message: its
+/// text is raw sqlx output (SQL, column, or constraint names) and must not leak to
+/// the operator. Every other variant's message is operator-facing.
 fn clean_err(err: abyssum_core::Error) -> String {
+    if let abyssum_core::Error::Database(_) = err {
+        return "a storage error occurred".to_string();
+    }
     let text = err.to_string();
     text.split_once(": ")
         .map(|(_, rest)| rest.to_string())
@@ -1643,6 +1648,22 @@ mod tests {
         // The ceiling itself is allowed (boundary), one past it is not.
         assert!(policy_from_form(&form("shape=uniform&min=0&max=86400")).is_ok());
         assert!(policy_from_form(&form("shape=uniform&min=0&max=86401")).is_err());
+    }
+
+    #[test]
+    fn clean_err_redacts_db_text_but_keeps_operator_messages() {
+        // A storage failure's raw sqlx text (SQL / constraint names) is never leaked.
+        let db = clean_err(abyssum_core::Error::Database(
+            "UNIQUE constraint failed: user_wordlists.name".to_string(),
+        ));
+        assert_eq!(db, "a storage error occurred");
+        // A validation message (Error::Other) still reaches the operator verbatim.
+        assert_eq!(
+            clean_err(abyssum_core::Error::Other(
+                "scope text is required".to_string()
+            )),
+            "scope text is required"
+        );
     }
 
     #[test]

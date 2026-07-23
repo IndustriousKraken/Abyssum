@@ -534,14 +534,17 @@ fn validate_name(name: &str) -> Result<String> {
 
 /// Reduce an operator-supplied filename to a safe basename: drop any path, strip
 /// characters that could break a `Content-Disposition` header (quotes, control
-/// bytes, path separators), and bound the length. An empty result becomes
-/// `"document"`. The stored filename is display/download metadata only — the
-/// served content type is decided from the bytes, not this name.
+/// bytes, path separators), keep only ASCII, and bound the length. An empty result
+/// becomes `"document"`. The stored filename is display/download metadata only —
+/// the served content type is decided from the bytes, not this name. Non-ASCII is
+/// dropped because the header value is emitted through `HeaderValue`, which accepts
+/// visible ASCII only; a non-ASCII byte there would fail conversion and 500 the
+/// serve, so a name kept here is guaranteed header-safe.
 fn sanitize_filename(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
     let cleaned: String = base
         .chars()
-        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .filter(|c| c.is_ascii() && !c.is_control() && *c != '"' && *c != '\\')
         .take(MAX_FILENAME_CHARS)
         .collect();
     let cleaned = cleaned.trim();
@@ -611,6 +614,10 @@ mod tests {
         assert_eq!(sanitize_filename("C:\\jobs\\scope.txt"), "scope.txt");
         // Quotes and control bytes that could break the header are stripped.
         assert_eq!(sanitize_filename("a\"b\r\n.txt"), "ab.txt");
+        // Non-ASCII is dropped (HeaderValue is ASCII-only): the remaining ASCII is
+        // kept, and a name that is entirely non-ASCII falls back to the default.
+        assert_eq!(sanitize_filename("café.pdf"), "caf.pdf");
+        assert_eq!(sanitize_filename("авторизация"), "document");
         // An empty / all-stripped name falls back to a fixed default.
         assert_eq!(sanitize_filename("   "), "document");
         assert_eq!(sanitize_filename(""), "document");
