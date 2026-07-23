@@ -67,6 +67,16 @@ async fn start_single(body: &'static str) -> Mock {
     start_mock(body, body).await
 }
 
+/// Bind a port and immediately drop the listener, yielding an authority nothing
+/// listens on: a query to it is refused (transport error) — a source that cannot
+/// be reached.
+async fn dead_authority() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    authority
+}
+
 async fn handle_conn(
     mut sock: TcpStream,
     ip_body: &'static str,
@@ -289,6 +299,44 @@ async fn unresolvable_domain_yields_nothing() {
     assert!(
         source.requests.lock().unwrap().is_empty(),
         "the registration-data source is not queried when resolution fails"
+    );
+}
+
+/// Task 5 (registration-data source unavailable): when the domain resolves but the
+/// registration-data source cannot be reached, the scan emits an informational
+/// finding naming the source and stating results may be incomplete — instead of a
+/// silently-empty result the operator would read as "no footprint".
+#[tokio::test]
+async fn unavailable_registration_source_reports_unavailable() {
+    let doh = start_single(DOH_A).await; // resolution succeeds (→ 8.8.8.8)
+    let dead_source = dead_authority().await; // the registration-data source is down
+
+    let scanner = AsnEnumerationScanner::new()
+        .with_source_base(Url::parse(&format!("http://{dead_source}/")).unwrap())
+        .with_doh_base(source_url(&doh));
+
+    let target = Target::parse("http://example.com").unwrap();
+    let findings = scanner.scan(&target, &ctx()).await.unwrap();
+
+    // The only finding is the source-availability note (no ASN could be looked up).
+    assert_eq!(
+        findings.len(),
+        1,
+        "just the source-availability note: {findings:#?}"
+    );
+    let note = &findings[0];
+    assert_eq!(note.status, Status::Info);
+    assert_eq!(note.severity, Severity::Info);
+    assert!(
+        note.title.contains("RIPEstat"),
+        "the finding names the registration-data source: {}",
+        note.title
+    );
+    let ev = note.evidence.as_ref().unwrap();
+    assert_eq!(ev["results_may_be_incomplete"], true);
+    assert!(
+        ev["status"].is_null(),
+        "an unreachable source carries no status"
     );
 }
 

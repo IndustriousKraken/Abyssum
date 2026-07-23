@@ -55,9 +55,16 @@ use abyssum_core::{
     ScannerFactory, ScannerRegistry, Severity, Status, Target,
 };
 
+use crate::source_availability::{self, SourceIssue};
+
 /// The stable scanner id. The registry keys on this and a scan selects by it; it
 /// must never change.
 const ID: &str = "subdomain_recon";
+
+/// Names for the external sources this scanner relies on, used when reporting that
+/// one was unavailable so an empty result is never mistaken for "no subdomains".
+const PASSIVE_SOURCE: &str = "certificate transparency (crt.sh)";
+const DOH_SOURCE: &str = "DNS-over-HTTPS resolver";
 
 /// The default passive source: a certificate-transparency log aggregator. Queried
 /// as `{base}/?q=%.<apex>&output=json`, returning the certificate names observed
@@ -225,11 +232,17 @@ impl SubdomainReconScanner {
 
     /// Gather the raw candidate names for `apex` from the configured source. Every
     /// passive query goes through [`ScanContext::send`], so it is paced and carries
-    /// a rotating User-Agent.
-    async fn discover(&self, apex: &str, ctx: &ScanContext) -> Result<Vec<String>> {
+    /// a rotating User-Agent. Records an entry in `issues` if the source could not
+    /// be consulted (so the caller can report it rather than returning silence).
+    async fn discover(
+        &self,
+        apex: &str,
+        ctx: &ScanContext,
+        issues: &mut Vec<SourceIssue>,
+    ) -> Result<Vec<String>> {
         match &self.discovery {
             Discovery::Fixed(list) => Ok(list.clone()),
-            Discovery::Passive { crtsh_base } => crtsh_query(crtsh_base, apex, ctx).await,
+            Discovery::Passive { crtsh_base } => crtsh_query(crtsh_base, apex, ctx, issues).await,
         }
     }
 
@@ -257,6 +270,7 @@ impl SubdomainReconScanner {
         apex: &str,
         passive: &[String],
         ctx: &ScanContext,
+        issues: &mut Vec<SourceIssue>,
     ) -> Result<Vec<String>> {
         let already: HashSet<&str> = passive.iter().map(String::as_str).collect();
         let generated: Vec<String> = self
@@ -285,8 +299,9 @@ impl SubdomainReconScanner {
                 break;
             }
             // A confirmed name joins the probe set; a non-existent one (NXDOMAIN)
-            // or an unreachable resolver is simply not confirmed — never fatal.
-            if doh_resolves(&self.doh_base, host, ctx).await? {
+            // or an unreachable resolver is simply not confirmed — never fatal. A
+            // resolver that was unreachable / non-2xx is recorded in `issues`.
+            if doh_resolves(&self.doh_base, host, ctx, issues).await? {
                 confirmed.push(host.clone());
             }
         }
@@ -349,7 +364,12 @@ impl BaseScanner for SubdomainReconScanner {
         let apex = target.host().unwrap_or_default().to_ascii_lowercase();
         let scheme = target.base_url().scheme();
 
-        let raw = self.discover(&apex, ctx).await?;
+        // External sources that could not be consulted this run — reported as
+        // informational findings at the end so an empty result is never mistaken
+        // for "this apex has no subdomains".
+        let mut source_issues: Vec<SourceIssue> = Vec::new();
+
+        let raw = self.discover(&apex, ctx, &mut source_issues).await?;
         let mut candidates = normalize_candidates(raw, &apex);
 
         // Active brute-force is opt-in and OFF by default: only when the operator
@@ -357,7 +377,9 @@ impl BaseScanner for SubdomainReconScanner {
         // existing brute-force candidates join the same probe set, so they flow
         // into the identical liveness + takeover evaluation as passive ones.
         if ctx.config().scanning.subdomain_bruteforce {
-            let confirmed = self.bruteforce(&apex, &candidates, ctx).await?;
+            let confirmed = self
+                .bruteforce(&apex, &candidates, ctx, &mut source_issues)
+                .await?;
             candidates.extend(confirmed);
         }
 
@@ -434,6 +456,12 @@ impl BaseScanner for SubdomainReconScanner {
 
             ctx.report_progress(progress(index + 1, total, host));
         }
+
+        // Report any source that could not be consulted, so the operator can tell
+        // an examined-but-empty surface from one that was never successfully looked
+        // at. A healthy source (even one that legitimately lists no names) adds
+        // nothing here.
+        findings.extend(source_availability::to_findings(source_issues, ID, target));
 
         Ok(findings)
     }
@@ -641,9 +669,17 @@ where
 /// Existence test for one brute-force candidate over DNS-over-HTTPS, through the
 /// paced request path. Queries the DoH JSON API for an `A` record and reports
 /// whether the name resolves. Best-effort: a non-success resolver status or a
-/// transport failure yields `false` (unconfirmed) rather than aborting the scan;
-/// cancellation propagates.
-async fn doh_resolves(doh_base: &Url, host: &str, ctx: &ScanContext) -> Result<bool> {
+/// transport failure yields `false` (unconfirmed) rather than aborting the scan,
+/// and records an entry in `issues` so an unavailable resolver is reported instead
+/// of silently under-confirming brute-force candidates; cancellation propagates. A
+/// 2xx that simply says the name does not exist (NXDOMAIN) is a healthy answer and
+/// records no issue.
+async fn doh_resolves(
+    doh_base: &Url,
+    host: &str,
+    ctx: &ScanContext,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<bool> {
     let mut url = doh_base.clone();
     url.query_pairs_mut()
         .clear()
@@ -656,7 +692,10 @@ async fn doh_resolves(doh_base: &Url, host: &str, ctx: &ScanContext) -> Result<b
         Ok(response) if (200..300).contains(&response.status) => {
             Ok(doh_indicates_exists(&response.body))
         }
-        Ok(_) => Ok(false),
+        Ok(response) => {
+            issues.push(SourceIssue::non_success(DOH_SOURCE, response.status));
+            Ok(false)
+        }
         Err(Error::Cancelled) => Err(Error::Cancelled),
         Err(err) => {
             tracing::debug!(
@@ -665,6 +704,7 @@ async fn doh_resolves(doh_base: &Url, host: &str, ctx: &ScanContext) -> Result<b
                 error = %err,
                 "DoH existence test failed; treating candidate as unresolved"
             );
+            issues.push(SourceIssue::errored(DOH_SOURCE));
             Ok(false)
         }
     }
@@ -689,9 +729,16 @@ fn doh_indicates_exists(body: &[u8]) -> bool {
 
 /// Query the crt.sh-style passive source at `base` for `apex`, through the paced
 /// request path, and extract the certificate names it observed. A non-2xx
-/// response, a transport failure, or an unparseable body yields no candidates
-/// (logged) rather than failing the scan — discovery is best-effort.
-async fn crtsh_query(base: &Url, apex: &str, ctx: &ScanContext) -> Result<Vec<String>> {
+/// response or a transport failure yields no candidates (logged, and recorded in
+/// `issues` so the caller can report the source as unavailable) rather than
+/// failing the scan — discovery is best-effort. A healthy 2xx response records no
+/// issue, even when it legitimately lists no names.
+async fn crtsh_query(
+    base: &Url,
+    apex: &str,
+    ctx: &ScanContext,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<Vec<String>> {
     let mut url = base.clone();
     // `?q=%.<apex>&output=json` — `query_pairs_mut` percent-encodes the SQL-LIKE
     // wildcard `%` for us, so the emitted query is `q=%25.<apex>`.
@@ -712,6 +759,7 @@ async fn crtsh_query(base: &Url, apex: &str, ctx: &ScanContext) -> Result<Vec<St
                 error = %err,
                 "passive source query failed; continuing with no candidates"
             );
+            issues.push(SourceIssue::errored(PASSIVE_SOURCE));
             return Ok(Vec::new());
         }
     };
@@ -723,6 +771,7 @@ async fn crtsh_query(base: &Url, apex: &str, ctx: &ScanContext) -> Result<Vec<St
             status = response.status,
             "passive source returned a non-success status; no candidates"
         );
+        issues.push(SourceIssue::non_success(PASSIVE_SOURCE, response.status));
         return Ok(Vec::new());
     }
 
