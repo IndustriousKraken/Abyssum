@@ -34,7 +34,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
     let nav = match user {
         Some(user) => format!(
             "<nav><span class=\"brand\">Abyssum</span>\
-             <a href=\"/\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
+             <a href=\"/scan\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
              <span class=\"muted\">{name}{admin}</span>\
              <form method=\"post\" action=\"/logout\" style=\"display:inline\">\

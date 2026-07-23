@@ -118,7 +118,7 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, body: Str
 
 // --- Pages -----------------------------------------------------------------
 
-/// `GET /` — the start-scan page.
+/// `GET /scan` — the start-scan page.
 pub async fn home(
     State(state): State<AppState>,
     Extension(user): Extension<User>,
@@ -129,7 +129,8 @@ pub async fn home(
     auth::html(view::home(&user, &csrf, &scanners), set)
 }
 
-/// `GET /dashboard` — stats + sessions + search shell.
+/// `GET /` and `GET /dashboard` — stats + sessions + search shell; the default
+/// post-login landing page.
 pub async fn dashboard(Extension(user): Extension<User>, headers: HeaderMap) -> Response {
     // Ensure the CSRF cookie exists for the nav's logout form on this page.
     let (_csrf, set) = auth::ensure_csrf(&headers);
@@ -953,7 +954,7 @@ fn fail_page(status: StatusCode, message: &str) -> Response {
         "Error",
         None,
         &format!(
-            "{}<p><a href=\"/\">Back to start</a></p>",
+            "{}<p><a href=\"/scan\">Back to start</a></p>",
             view::error_fragment(message)
         ),
     );

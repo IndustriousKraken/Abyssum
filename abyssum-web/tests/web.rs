@@ -137,7 +137,7 @@ async fn registration_first_user_then_duplicate_then_login() {
     assert_eq!(resp.status, 409);
     assert!(resp.body.to_lowercase().contains("taken") || resp.body.contains("error"));
 
-    // Full HTTP login sets the session cookie and serves the home page.
+    // Full HTTP login sets the session cookie and lands on the dashboard (`/`).
     let mut login = app.client();
     login.get("/login").await;
     let csrf = login.csrf();
@@ -150,7 +150,11 @@ async fn registration_first_user_then_duplicate_then_login() {
         "login set a session cookie"
     );
 
+    // `/` is now the dashboard; the start-scan page keeps its own `/scan` route.
     let resp = login.get("/").await;
+    assert_eq!(resp.status, 200);
+    assert!(resp.body.contains("Dashboard"));
+    let resp = login.get("/scan").await;
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("Start a scan"));
 

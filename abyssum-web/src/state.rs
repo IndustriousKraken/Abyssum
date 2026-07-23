@@ -91,7 +91,10 @@ impl AppState {
 pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     // Pages: a missing session redirects the browser to the login page.
     let page_routes = Router::new()
-        .route("/", get(handlers::home))
+        // The dashboard is the default post-login landing at `/`; the start-scan
+        // page keeps its own route (`/scan`), reachable from the nav.
+        .route("/", get(handlers::dashboard))
+        .route("/scan", get(handlers::home))
         .route("/dashboard", get(handlers::dashboard))
         .route("/scan/{id}", get(handlers::scan_detail))
         .route("/custom-requests", get(handlers::custom_page))
