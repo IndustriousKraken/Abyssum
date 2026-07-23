@@ -17,6 +17,6 @@ Today: `state.rs` routes `/` → `handlers::home` (start a scan) and `/dashboard
 
 ## Tasks
 
-- [ ] Make the dashboard the default post-login view — e.g. redirect `/` (or the post-login
+- [x] Make the dashboard the default post-login view — e.g. redirect `/` (or the post-login
       redirect) to the dashboard, keeping the start-scan page reachable from the nav.
-- [ ] Keep the nav links and all existing routes working; only the default/landing changes.
+- [x] Keep the nav links and all existing routes working; only the default/landing changes.

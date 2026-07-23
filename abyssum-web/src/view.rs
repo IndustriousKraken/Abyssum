@@ -34,7 +34,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
     let nav = match user {
         Some(user) => format!(
             "<nav><span class=\"brand\">Abyssum</span>\
-             <a href=\"/\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
+             <a href=\"/scan\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
              <span class=\"muted\">{name}{admin}</span>\
              <form method=\"post\" action=\"/logout\" style=\"display:inline\">\
@@ -124,8 +124,8 @@ pub fn register(csrf: &str, error: Option<&str>) -> String {
     page("Register", None, &body)
 }
 
-/// The start-scan home page: pick scanners + targets and submit.
-pub fn home(user: &User, csrf: &str, scanner_ids: &[String]) -> String {
+/// The start-scan page: pick scanners + targets and submit.
+pub fn scan_page(user: &User, csrf: &str, scanner_ids: &[String]) -> String {
     let options = scanner_ids
         .iter()
         .map(|id| {
