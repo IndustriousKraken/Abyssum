@@ -119,14 +119,14 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, body: Str
 // --- Pages -----------------------------------------------------------------
 
 /// `GET /scan` — the start-scan page.
-pub async fn home(
+pub async fn scan_page(
     State(state): State<AppState>,
     Extension(user): Extension<User>,
     headers: HeaderMap,
 ) -> Response {
     let (csrf, set) = auth::ensure_csrf(&headers);
     let scanners = state.orchestrator.registry().available();
-    auth::html(view::home(&user, &csrf, &scanners), set)
+    auth::html(view::scan_page(&user, &csrf, &scanners), set)
 }
 
 /// `GET /` and `GET /dashboard` — stats + sessions + search shell; the default

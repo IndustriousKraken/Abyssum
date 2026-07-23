@@ -94,7 +94,7 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         // The dashboard is the default post-login landing at `/`; the start-scan
         // page keeps its own route (`/scan`), reachable from the nav.
         .route("/", get(handlers::dashboard))
-        .route("/scan", get(handlers::home))
+        .route("/scan", get(handlers::scan_page))
         .route("/dashboard", get(handlers::dashboard))
         .route("/scan/{id}", get(handlers::scan_detail))
         .route("/custom-requests", get(handlers::custom_page))
