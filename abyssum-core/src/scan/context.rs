@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::rate_limiter::{Pace, RateLimiter};
+use crate::rate_limiter::{Pace, PacingPolicy, RateLimiter};
 
 use super::options::ScanOptions;
 use super::progress::{ProgressCallback, ProgressUpdate};
@@ -134,6 +134,16 @@ pub struct RequestSpec {
     /// the scan is otherwise configured with a credential. Pacing, the User-Agent,
     /// cancellation, and progress are unaffected — only the credential is omitted.
     pub omit_credential: bool,
+    /// When `true`, this request is a **support-infrastructure lookup**: a query to
+    /// a third-party service the operator uses to discover or map the target — a
+    /// public DNS resolver, a certificate-transparency log aggregator, an RDAP /
+    /// WHOIS service — rather than traffic to the target itself. It is then paced by
+    /// the separate, faster support policy instead of the target floor and is exempt
+    /// from the target-distress halt (see the rate limiter). Defaults to `false`: a
+    /// request is target traffic unless a scanner marks it with
+    /// [`support_lookup`](Self::support_lookup). Pacing still applies — the support
+    /// lane is a *different* policy, not an unpaced one.
+    pub support_infrastructure: bool,
 }
 
 impl RequestSpec {
@@ -150,6 +160,7 @@ impl RequestSpec {
             headers: Vec::new(),
             body: None,
             omit_credential: false,
+            support_infrastructure: false,
         }
     }
 
@@ -171,6 +182,21 @@ impl RequestSpec {
         self.omit_credential = true;
         self
     }
+
+    /// Mark this request as a support-infrastructure lookup (builder-style), so it
+    /// is paced by the faster support lane rather than held to the target floor. See
+    /// [`support_infrastructure`](Self::support_infrastructure).
+    ///
+    /// This also sends the request **without** the scan's credential: a public DNS
+    /// resolver, a CT / RDAP aggregator, or a passive-DNS service is a third party,
+    /// never the target, so the target's bearer token / cookie must not travel to
+    /// it. Marking the lookup here anonymizes every support query in one place
+    /// rather than relying on each call site to remember [`without_credential`](Self::without_credential).
+    pub fn support_lookup(mut self) -> Self {
+        self.support_infrastructure = true;
+        self.omit_credential = true;
+        self
+    }
 }
 
 /// Everything a scanner is handed when it runs. Cheaply cloneable (every field is
@@ -186,6 +212,11 @@ pub struct ScanContext {
     cancel: CancellationToken,
     auth: Option<Credential>,
     options: Arc<ScanOptions>,
+    /// The pacing policy for this scan's **target** traffic, resolved from the
+    /// selected timing profile (g05). `None` ⇒ the rate limiter's configured
+    /// conservative default. Only the base-delay draw is policy-dependent; the
+    /// adaptive backoff and distress halt apply regardless (see [`RateLimiter`]).
+    target_pacing: Option<PacingPolicy>,
 }
 
 impl ScanContext {
@@ -208,6 +239,7 @@ impl ScanContext {
             cancel,
             auth: None,
             options: Arc::new(ScanOptions::default()),
+            target_pacing: None,
         }
     }
 
@@ -224,6 +256,15 @@ impl ScanContext {
     /// so the per-unit context clones stay cheap.
     pub fn with_options(mut self, options: Arc<ScanOptions>) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Set the pacing policy this scan's target traffic is drawn from (builder-style),
+    /// resolved from the selected timing profile (g05). A context without this uses
+    /// the rate limiter's configured conservative default. The support lane and the
+    /// backoff/distress protections are unaffected.
+    pub fn with_target_pacing(mut self, policy: PacingPolicy) -> Self {
+        self.target_pacing = Some(policy);
         self
     }
 
@@ -299,9 +340,20 @@ impl ScanContext {
             .host_str()
             .ok_or_else(|| Error::Target(format!("request URL has no host: {}", request.url)))?
             .to_string();
+        let support = request.support_infrastructure;
 
-        // Pace first — the floor is enforced here, before any bytes leave.
-        match self.rate_limiter.acquire(&host).await {
+        // Pace first — the floor is enforced here, before any bytes leave. A
+        // support-infrastructure lookup uses the separate, faster support lane;
+        // everything else is target traffic paced by the scan's selected timing
+        // profile (or the conservative default when none was selected).
+        let pace = if support {
+            self.rate_limiter.acquire_support(&host).await
+        } else {
+            self.rate_limiter
+                .acquire_with(&host, self.target_pacing.as_ref())
+                .await
+        };
+        match pace {
             Pace::Halt => {
                 return Err(Error::Http(format!(
                     "pacing halted further requests to {host}: sustained target distress"
@@ -340,10 +392,15 @@ impl ScanContext {
             .map_err(|e| Error::Http(e.to_string()))?;
 
         // Feed the response back into the limiter so distress grows backoff and
-        // clean completions decay it.
-        self.rate_limiter
-            .record_signal(&host, response.status().as_u16())
-            .await;
+        // clean completions decay it — on the same lane the request used, so a
+        // support service's rate-limit signal backs off the support lane and a
+        // target's distress backs off (and can halt) the target lane.
+        let status = response.status().as_u16();
+        if support {
+            self.rate_limiter.record_signal_support(&host, status).await;
+        } else {
+            self.rate_limiter.record_signal(&host, status).await;
+        }
 
         Ok(response)
     }
@@ -384,6 +441,93 @@ mod tests {
         assert!(!RequestSpec::get(url.clone()).omit_credential);
         // A BAC/IDOR probe opts out explicitly.
         assert!(RequestSpec::get(url).without_credential().omit_credential);
+    }
+
+    #[test]
+    fn request_spec_support_lookup_defaults_off() {
+        let url = Url::parse("https://cloudflare-dns.com/dns-query").unwrap();
+        // By default a request is target traffic, carrying the credential.
+        assert!(!RequestSpec::get(url.clone()).support_infrastructure);
+        assert!(!RequestSpec::get(url.clone()).omit_credential);
+        // A discovery/mapping query to a third-party service opts into the support
+        // lane AND drops the credential, so the target's token never reaches it.
+        let spec = RequestSpec::get(url).support_lookup();
+        assert!(spec.support_infrastructure);
+        assert!(spec.omit_credential, "a support lookup must be anonymized");
+    }
+
+    /// A support-infrastructure lookup must reach the third-party service with **no**
+    /// `Authorization`/`Cookie` header even when the scan carries a credential, while
+    /// ordinary target traffic still carries it (the positive control proves the
+    /// assertion bites).
+    #[tokio::test]
+    async fn support_lookup_is_sent_without_the_scan_credential() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let heads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    sink.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf).into_owned());
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let base = Url::parse(&format!("http://{addr}/")).unwrap();
+        let c = ctx(CancellationToken::new()).with_credential(Credential {
+            bearer: Some("secret-token".into()),
+            cookie: Some("sid=abc".into()),
+        });
+
+        // Support lookup first, then a normal target request to the same host.
+        c.send(RequestSpec::get(base.clone()).support_lookup())
+            .await
+            .unwrap();
+        c.send(RequestSpec::get(base.clone())).await.unwrap();
+
+        let heads = heads.lock().unwrap();
+        assert_eq!(heads.len(), 2, "both requests reached the mock");
+        let support = heads[0].to_ascii_lowercase();
+        assert!(
+            !support.contains("authorization:"),
+            "support lookup leaked a bearer token: {}",
+            heads[0]
+        );
+        assert!(
+            !support.contains("cookie:"),
+            "support lookup leaked a cookie: {}",
+            heads[0]
+        );
+        let normal = heads[1].to_ascii_lowercase();
+        assert!(
+            normal.contains("authorization:") && normal.contains("cookie:"),
+            "the credential must still reach target traffic: {}",
+            heads[1]
+        );
     }
 
     #[tokio::test]

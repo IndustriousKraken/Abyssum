@@ -10,9 +10,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use abyssum_core::{
-    CustomRequestSpec, Finding, FindingFilter, FindingId, ProgressCallback, ProgressUpdate,
-    ScanOptions, ScanSession, SessionHandle, Severity, Status, TagApply, Target, User,
-    execute_custom_request, normalize_url, visible_session, visible_sessions,
+    CustomRequestSpec, Finding, FindingFilter, FindingId, PacingPolicy, ProgressCallback,
+    ProgressUpdate, ScanOptions, ScanSession, SessionHandle, Severity, Status,
+    TIMING_POLICY_OPTION, TagApply, Target, User, execute_custom_request, normalize_url,
+    visible_session, visible_sessions,
 };
 use axum::Extension;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
@@ -126,7 +127,13 @@ pub async fn scan_page(
 ) -> Response {
     let (csrf, set) = auth::ensure_csrf(&headers);
     let scanners = state.orchestrator.registry().available();
-    auth::html(view::scan_page(&user, &csrf, &scanners), set)
+    // The user's own timing profiles populate the pacing selector (private to them).
+    let profiles = state
+        .timing
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    auth::html(view::scan_page(&user, &csrf, &scanners, &profiles), set)
 }
 
 /// `GET /` and `GET /dashboard` — stats + sessions + search shell; the default
@@ -340,11 +347,24 @@ pub async fn start_scan(
     }
 
     // Per-scan option inputs are namespaced under `opt.<key>` on the scan form;
-    // collect any present so the scan carries them. No option inputs exist on the
-    // form yet — the feature changes that build on g03 (brute-force toggle, timing
-    // profile, wordlist) add them and read their own key back through the scan
-    // context — so today this is empty and the scan applies defaults.
-    let options = scan_options_from_form(&form);
+    // collect any present so the scan carries them.
+    let mut options = scan_options_from_form(&form);
+
+    // Resolve the selected timing profile (a profile id under `opt.timing_profile`)
+    // to the concrete pacing policy the engine draws from, recorded under the
+    // reserved option key the orchestrator reads (g05). The lookup is owner-scoped,
+    // so a user can only ever select one of their own profiles; a blank or unknown
+    // selection leaves the conservative default in force.
+    if let Some(selection) = options
+        .get("timing_profile")
+        .map(str::trim)
+        .map(str::to_string)
+        && let Ok(id) = selection.parse::<i64>()
+        && let Ok(Some(profile)) = state.timing.get_for_user(user.id, id).await
+        && let Ok(json) = serde_json::to_string(&profile.policy)
+    {
+        options.set(TIMING_POLICY_OPTION, json);
+    }
 
     // create_session_with_options validates every scanner id up front (unknown →
     // error, no session created), so an unknown id never issues traffic.
@@ -462,6 +482,100 @@ pub async fn custom_exec(
 
     let outcome = execute_custom_request(&spec, &state.limiter).await;
     auth::html(view::custom_response(&outcome), None)
+}
+
+// --- Timing profiles -------------------------------------------------------
+
+/// `GET /timing-profiles` — the user's reusable pacing profiles plus a form to
+/// add a new one or adjust an existing one. Private to the user (owner-scoped).
+pub async fn timing_profiles_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    let (csrf, set) = auth::ensure_csrf(&headers);
+    let profiles = state
+        .timing
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    auth::html(view::timing_profiles_page(&user, &csrf, &profiles), set)
+}
+
+/// `POST /timing-profiles` — create a new profile owned by the authenticated user.
+pub async fn create_timing_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("").to_string();
+    let policy = match policy_from_form(&form) {
+        Ok(policy) => policy,
+        Err(msg) => return fail_page(StatusCode::BAD_REQUEST, &msg),
+    };
+    match state.timing.create(user.id, &name, &policy).await {
+        Ok(_) => auth::redirect("/timing-profiles", &[]),
+        Err(err) => fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
+    }
+}
+
+/// `POST /timing-profiles/{id}` — adjust one of the user's profiles (owner-scoped:
+/// a profile the user does not own is treated as not found).
+pub async fn update_timing_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("").to_string();
+    let policy = match policy_from_form(&form) {
+        Ok(policy) => policy,
+        Err(msg) => return fail_page(StatusCode::BAD_REQUEST, &msg),
+    };
+    match state.timing.update(user.id, id, &name, &policy).await {
+        Ok(_) => auth::redirect("/timing-profiles", &[]),
+        Err(err) => fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
+    }
+}
+
+/// Ceiling on a user-entered pacing delay: one day. Well beyond any realistic
+/// stealth pacing, but bounded so a finite-but-huge value (e.g. `1e300`) can never
+/// be stored and later overflow `Duration` when the profile paces its first request.
+const MAX_DELAY_SECS: f64 = 86_400.0;
+
+/// Build a [`PacingPolicy`] from the management form's `shape` + `min` + `max`
+/// fields. `organic` yields a heavy-tailed shape sized from the window; anything
+/// else a uniform window. Non-numeric, negative, or out-of-range delays are rejected.
+fn policy_from_form(form: &[(String, String)]) -> Result<PacingPolicy, String> {
+    let parse = |name: &str| -> Result<f64, String> {
+        let raw = field(form, name).unwrap_or("").trim().to_string();
+        let value: f64 = raw
+            .parse()
+            .map_err(|_| format!("{name} must be a number of seconds"))?;
+        // `contains` also rejects NaN and infinity (neither is in the range).
+        if !(0.0..=MAX_DELAY_SECS).contains(&value) {
+            return Err(format!(
+                "{name} must be a number of seconds between 0 and {MAX_DELAY_SECS}"
+            ));
+        }
+        Ok(value)
+    };
+    let min = parse("min")?;
+    let max = parse("max")?;
+    Ok(match field(form, "shape") {
+        Some("organic") => PacingPolicy::organic(min, max),
+        _ => PacingPolicy::uniform(min, max),
+    })
 }
 
 // --- SSRF guard ------------------------------------------------------------
@@ -1108,6 +1222,28 @@ mod tests {
         assert_eq!(options.get("timing_profile"), Some("organic"));
         assert_eq!(options.get("brute"), Some("on"));
         assert_eq!(options.get("scanners"), None);
+    }
+
+    #[test]
+    fn policy_from_form_rejects_out_of_range_delays() {
+        let form = |s: &str| parse_form(s);
+        // A sane window parses into the matching shape.
+        assert!(matches!(
+            policy_from_form(&form("shape=uniform&min=1&max=3")).unwrap(),
+            PacingPolicy::Uniform { .. }
+        ));
+        assert!(matches!(
+            policy_from_form(&form("shape=organic&min=1&max=6")).unwrap(),
+            PacingPolicy::Organic { .. }
+        ));
+        // A finite-but-huge value that would overflow Duration is rejected, not stored.
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=1e300")).is_err());
+        // Negatives and non-numbers are rejected too.
+        assert!(policy_from_form(&form("shape=uniform&min=-1&max=3")).is_err());
+        assert!(policy_from_form(&form("shape=uniform&min=x&max=3")).is_err());
+        // The ceiling itself is allowed (boundary), one past it is not.
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=86400")).is_ok());
+        assert!(policy_from_form(&form("shape=uniform&min=0&max=86401")).is_err());
     }
 
     #[test]

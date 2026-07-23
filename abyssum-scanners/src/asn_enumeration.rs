@@ -270,7 +270,8 @@ impl AsnEnumerationScanner {
         let Some(url) = source_url(&self.source_base, "prefix-overview/data.json", ip) else {
             return Ok(None);
         };
-        match probe(ctx, RequestSpec::get(url)).await {
+        // A registration-data source queried to map the target: support-lane pacing.
+        match probe(ctx, RequestSpec::get(url).support_lookup()).await {
             Ok(response) if (200..300).contains(&response.status) => {
                 Ok(parse_ip_lookup(&response.body))
             }
@@ -315,7 +316,8 @@ impl AsnEnumerationScanner {
         ) else {
             return Ok(Vec::new());
         };
-        match probe(ctx, RequestSpec::get(url)).await {
+        // A registration-data source queried to map the target: support-lane pacing.
+        match probe(ctx, RequestSpec::get(url).support_lookup()).await {
             Ok(response) if (200..300).contains(&response.status) => {
                 Ok(parse_asn_prefixes(&response.body))
             }
@@ -465,8 +467,11 @@ async fn doh_resolve_ipv4(
         .clear()
         .append_pair("name", host)
         .append_pair("type", "A");
-    // The DoH JSON API is selected by the `application/dns-json` Accept header.
-    let spec = RequestSpec::get(url).header("Accept", "application/dns-json");
+    // The DoH JSON API is selected by the `application/dns-json` Accept header. This
+    // is a public-resolver query to map the target, so it uses the support lane.
+    let spec = RequestSpec::get(url)
+        .header("Accept", "application/dns-json")
+        .support_lookup();
 
     match probe(ctx, spec).await {
         Ok(response) if (200..300).contains(&response.status) => {

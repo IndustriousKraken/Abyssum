@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use abyssum_core::{
     AnnotationStore, AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter,
-    ScannerRegistry,
+    ScannerRegistry, TimingProfileStore,
 };
 use abyssum_scanners::register_builtins;
 use axum::Router;
@@ -41,6 +41,8 @@ pub struct AppState {
     pub auth: AuthManager,
     /// Notes + color tags over sessions and findings, gated by session ownership.
     pub annotations: AnnotationStore,
+    /// Per-user timing profiles (reusable pacing shapes), gated by owner.
+    pub timing: TimingProfileStore,
     /// The scan engine, shared so background runs and handlers drive one engine.
     pub orchestrator: Arc<Orchestrator>,
     /// Live per-session progress fan-out for the WebSocket endpoint.
@@ -64,6 +66,7 @@ impl AppState {
 
         let auth = AuthManager::from_database(&db, &config);
         let annotations = AnnotationStore::from_database(&db);
+        let timing = TimingProfileStore::from_database(&db);
         let limiter = RateLimiter::from_config(&config.scanning);
         let orchestrator = Arc::new(Orchestrator::new(config.clone(), registry));
 
@@ -72,6 +75,7 @@ impl AppState {
             db,
             auth,
             annotations,
+            timing,
             orchestrator,
             hub: Hub::default(),
             limiter,
@@ -98,6 +102,7 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/dashboard", get(handlers::dashboard))
         .route("/scan/{id}", get(handlers::scan_detail))
         .route("/custom-requests", get(handlers::custom_page))
+        .route("/timing-profiles", get(handlers::timing_profiles_page))
         .route("/logout", post(handlers::logout))
         .route_layer(from_fn_with_state(state.clone(), require_user_page));
 
@@ -110,6 +115,12 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/stats", get(handlers::stats_fragment))
         .route("/findings", get(handlers::findings_fragment))
         .route("/custom-requests", post(handlers::custom_exec))
+        // Timing-profile management: create a profile, adjust an existing one.
+        .route("/timing-profiles", post(handlers::create_timing_profile))
+        .route(
+            "/timing-profiles/{id}",
+            post(handlers::update_timing_profile),
+        )
         // Annotations: notes on sessions/findings, color tags, and the
         // note/tag-scoped session searches. All owner-gated in the handlers.
         .route(

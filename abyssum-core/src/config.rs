@@ -153,6 +153,27 @@ pub struct ScanningConfig {
     /// existence). Off by default: reconnaissance stays passive unless the operator
     /// deliberately opts in (conservative-by-default, aggression opt-in).
     pub subdomain_bruteforce: bool,
+    /// Lower bound of the **support-infrastructure** pacing window, in seconds.
+    /// Support lookups — queries to a third-party service the operator uses to
+    /// *map* the target (a public DNS resolver, a certificate-transparency / RDAP
+    /// aggregator) — are paced by this faster window instead of the target floor,
+    /// because those are shared services built for volume, not the target to tread
+    /// lightly on. See the rate-limiting capability's support-lane requirement.
+    pub support_min_delay: f64,
+    /// Upper bound of the support-infrastructure pacing window, in seconds. Kept
+    /// small so a large recon phase (e.g. subdomain brute-force over a public
+    /// resolver) completes fast, but bounded so it is never abusive toward that
+    /// service.
+    pub support_max_delay: f64,
+    /// Maximum in-flight support-infrastructure lookups, higher than the target
+    /// concurrency because a public resolver tolerates more parallelism than a
+    /// target's own web server.
+    ///
+    // ponytail: an unenforced posture knob today, exactly like `max_concurrency`
+    // (no engine component reads either yet — scanners issue lookups in a
+    // sequential loop); wire both to a shared semaphore if/when lookups are issued
+    // concurrently.
+    pub support_max_concurrency: usize,
 }
 
 /// Granularity of the engine's default User-Agent rotation.
@@ -267,6 +288,11 @@ impl Default for ScanningConfig {
             max_concurrency: 4,
             user_agent_rotation: UserAgentRotation::default(),
             subdomain_bruteforce: false,
+            // Fast but bounded: ~4–20 lookups/s against a public resolver, versus
+            // the 1–3s conservative target floor above.
+            support_min_delay: 0.05,
+            support_max_delay: 0.25,
+            support_max_concurrency: 8,
         }
     }
 }
@@ -373,6 +399,16 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE") {
             self.scanning.subdomain_bruteforce =
                 parse_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_SUPPORT_MIN_DELAY") {
+            self.scanning.support_min_delay = parse_env("ABYSSUM_SCANNING_SUPPORT_MIN_DELAY", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_SUPPORT_MAX_DELAY") {
+            self.scanning.support_max_delay = parse_env("ABYSSUM_SCANNING_SUPPORT_MAX_DELAY", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_SUPPORT_MAX_CONCURRENCY") {
+            self.scanning.support_max_concurrency =
+                parse_env("ABYSSUM_SCANNING_SUPPORT_MAX_CONCURRENCY", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_AUTH_SESSION_ABSOLUTE_MAX_HOURS") {
             self.auth.session_absolute_max_hours =
@@ -612,6 +648,47 @@ mod tests {
         let env = env_of(&[("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", "true")]);
         let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
         assert!(cfg.scanning.subdomain_bruteforce);
+    }
+
+    #[test]
+    fn support_lane_defaults_are_fast_and_bounded() {
+        let s = Config::default().scanning;
+        // Faster than the target floor — that is the whole point of the lane.
+        assert!(
+            s.support_max_delay < s.min_delay,
+            "the support window must beat the target floor"
+        );
+        // ...but non-zero and bounded, so it is not abusive toward a public service.
+        assert!(s.support_min_delay >= 0.0);
+        assert!(s.support_max_delay > s.support_min_delay);
+        // Higher concurrency posture than target traffic.
+        assert!(s.support_max_concurrency >= s.max_concurrency);
+    }
+
+    #[test]
+    fn support_lane_env_override() {
+        let env = env_of(&[
+            ("ABYSSUM_SCANNING_SUPPORT_MIN_DELAY", "0.01"),
+            ("ABYSSUM_SCANNING_SUPPORT_MAX_DELAY", "0.1"),
+            ("ABYSSUM_SCANNING_SUPPORT_MAX_CONCURRENCY", "32"),
+        ]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.scanning.support_min_delay, 0.01);
+        assert_eq!(cfg.scanning.support_max_delay, 0.1);
+        assert_eq!(cfg.scanning.support_max_concurrency, 32);
+    }
+
+    #[test]
+    fn support_lane_parses_from_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abyssum.yaml");
+        std::fs::write(&path, "scanning:\n  support_max_delay: 0.5\n").unwrap();
+
+        let cfg = Config::from_file_or_default(&path).unwrap();
+        assert_eq!(cfg.scanning.support_max_delay, 0.5);
+        // Sibling keys keep their defaults.
+        assert_eq!(cfg.scanning.support_min_delay, 0.05);
+        assert_eq!(cfg.scanning.min_delay, 1.0);
     }
 
     #[test]

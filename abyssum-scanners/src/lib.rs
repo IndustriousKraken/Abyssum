@@ -49,7 +49,7 @@ pub use idor::IdorScanner;
 pub use openapi_discovery::OpenApiDiscoveryScanner;
 pub use origin_discovery::OriginDiscoveryScanner;
 pub use rest_discovery::RestDiscoveryScanner;
-pub use subdomain_recon::SubdomainReconScanner;
+pub use subdomain_recon::{SUBDOMAIN_BRUTEFORCE_OPTION, SubdomainReconScanner};
 
 use abyssum_core::{ReferenceStore, ScannerRegistry};
 

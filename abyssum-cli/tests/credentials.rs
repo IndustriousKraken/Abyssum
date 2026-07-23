@@ -26,6 +26,7 @@ fn scan_cli(
         identities: vec![],
         cookie,
         bearer,
+        bruteforce: false,
         min_delay: None,
         max_delay: None,
         log_level: None,

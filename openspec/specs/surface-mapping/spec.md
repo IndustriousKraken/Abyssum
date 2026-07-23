@@ -7,7 +7,8 @@ TBD - created by archiving change e01-add-subdomain-recon. Update Purpose after 
 The system SHALL discover subdomains of a target apex domain by querying passive
 certificate-transparency and/or passive-DNS sources, and SHALL NOT brute-force the
 target's own DNS in doing so. Every source query SHALL be issued through the shared
-paced request path, so the configured pacing floor and User-Agent rotation apply.
+paced request path as a support-infrastructure lookup, so User-Agent rotation applies and
+pacing follows the support-infrastructure policy rather than the target pacing floor.
 
 #### Scenario: Subdomains gathered from a passive source
 - **GIVEN** an apex domain with known subdomains recorded in a passive source
@@ -20,10 +21,10 @@ paced request path, so the configured pacing floor and User-Agent rotation apply
 - **THEN** candidates SHALL come from passive sources
 - **AND** the system SHALL NOT enumerate the target's DNS by brute force in this pass
 
-#### Scenario: Source queries are paced
+#### Scenario: Source queries are paced as support infrastructure
 - **GIVEN** a passive source is queried
 - **WHEN** the query is issued
-- **THEN** it SHALL pass through the paced request path subject to the pacing floor and User-Agent rotation
+- **THEN** it SHALL pass through the paced request path as a support-infrastructure lookup, with User-Agent rotation
 
 ### Requirement: Report Live Discovered Subdomains
 The system SHALL probe each discovered candidate to determine whether it is live, and
@@ -61,11 +62,14 @@ finding.
 
 ### Requirement: Optional Active Subdomain Brute-Force
 The system SHALL support an opt-in active subdomain brute-force discovery source that
-generates candidate subdomains from a wordlist and tests each for existence, and this
+generates candidate subdomains from a wordlist and tests each for existence by querying a
+public DNS resolver — a request sent to the resolver, not directly to the target — and this
 source SHALL be disabled by default so that reconnaissance stays passive unless the
 operator enables it. Candidates confirmed to exist SHALL be evaluated for liveness and
-takeover exactly as passively-discovered subdomains are. All existence tests and probes
-SHALL pass through the paced request path.
+takeover exactly as passively-discovered subdomains are. The existence-test queries to the
+resolver are support-infrastructure lookups; the subsequent liveness and takeover probes are
+sent to the discovered hosts and are target traffic. All SHALL pass through the paced request
+path.
 
 #### Scenario: Brute-force is off by default
 - **GIVEN** subdomain reconnaissance with no active brute-force explicitly enabled
@@ -82,10 +86,10 @@ SHALL pass through the paced request path.
 - **WHEN** reconnaissance evaluates it
 - **THEN** it SHALL be assessed for liveness and takeover the same way a passively-discovered subdomain is
 
-#### Scenario: Existence tests are paced
+#### Scenario: Existence tests are paced as support infrastructure
 - **GIVEN** active brute-force is enabled
 - **WHEN** candidates are tested for existence
-- **THEN** each test SHALL pass through the paced request path subject to the pacing floor and User-Agent rotation
+- **THEN** each existence test SHALL pass through the paced request path as a support-infrastructure lookup, with User-Agent rotation
 
 ### Requirement: Discover Origin IP Behind A CDN Or WAF
 The system SHALL attempt to discover the true origin IP of a target that is served
@@ -129,10 +133,10 @@ BGP action. All source queries SHALL pass through the paced request path.
 - **WHEN** it queries registration-data sources
 - **THEN** it SHALL NOT manipulate routing or perform any BGP action
 
-#### Scenario: Source queries are paced
+#### Scenario: Source queries are paced as support infrastructure
 - **GIVEN** enumeration queries a registration-data source
 - **WHEN** the query is issued
-- **THEN** it SHALL pass through the paced request path subject to the pacing floor and User-Agent rotation
+- **THEN** it SHALL pass through the paced request path as a support-infrastructure lookup, with User-Agent rotation
 
 ### Requirement: Discover Exposed Cloud Storage Assets
 The system SHALL discover candidate cloud-storage assets for a target by generating
@@ -245,4 +249,25 @@ a finding.
 - **WHEN** reconnaissance completes
 - **THEN** no source-availability finding SHALL be emitted
 - **AND** the absence of discovered subdomains SHALL therefore reflect the source's answer rather than a failure to consult it
+
+### Requirement: Active Subdomain Brute-Force Is Selectable Per Scan
+The operator SHALL be able to enable the opt-in active subdomain brute-force for a specific
+scan, defaulting to off, so it can be used on one scan without changing global configuration.
+When it is enabled for a scan, that scan's subdomain reconnaissance SHALL perform the active
+brute-force; when it is not, that scan SHALL remain passive.
+
+#### Scenario: Enabling per scan runs brute-force for that scan
+- **GIVEN** a scan for which active subdomain brute-force is enabled
+- **WHEN** subdomain reconnaissance runs for that scan
+- **THEN** it SHALL perform the active brute-force
+
+#### Scenario: Default is off
+- **GIVEN** a scan for which active subdomain brute-force is not enabled
+- **WHEN** subdomain reconnaissance runs for that scan
+- **THEN** it SHALL remain passive and perform no brute-force
+
+#### Scenario: The choice is per scan
+- **GIVEN** two scans, one with brute-force enabled and one without
+- **WHEN** each runs
+- **THEN** the enabled scan SHALL brute-force and the other SHALL not, independently of each other
 

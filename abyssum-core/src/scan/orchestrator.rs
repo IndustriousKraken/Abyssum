@@ -25,7 +25,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::{PacingPolicy, RateLimiter};
+use crate::timing::TIMING_POLICY_OPTION;
 
 use super::context::{Credential, ScanContext, UserAgentSource, build_engine_http_client};
 use super::options::ScanOptions;
@@ -277,6 +278,13 @@ impl Orchestrator {
             )
         };
 
+        // Resolve the scan's target pacing once: a selected timing profile rides in
+        // the options as a JSON-encoded policy under `TIMING_POLICY_OPTION` (g05).
+        // Absent or unparseable ⇒ `None` ⇒ the rate limiter's conservative default.
+        let target_pacing: Option<PacingPolicy> = options
+            .get(TIMING_POLICY_OPTION)
+            .and_then(|json| serde_json::from_str(json).ok());
+
         let fanout = self.build_fanout(progress);
 
         let mut ran_any = false;
@@ -302,7 +310,7 @@ impl Orchestrator {
                     break 'outer;
                 }
 
-                let ctx = self.context_for(&cancel, &fanout, &options);
+                let ctx = self.context_for(&cancel, &fanout, &options, &target_pacing);
 
                 // Race the scan against cancellation: a long-awaiting scan unwinds
                 // promptly when the token fires (the scan future is dropped).
@@ -394,8 +402,9 @@ impl Orchestrator {
         cancel: &CancellationToken,
         fanout: &ProgressCallback,
         options: &Arc<ScanOptions>,
+        target_pacing: &Option<PacingPolicy>,
     ) -> ScanContext {
-        let ctx = ScanContext::new(
+        let mut ctx = ScanContext::new(
             self.config.clone(),
             self.rate_limiter.clone(),
             self.ua_source.clone(),
@@ -404,6 +413,9 @@ impl Orchestrator {
         .with_http_client(self.http.clone())
         .with_progress(fanout.clone())
         .with_options(options.clone());
+        if let Some(policy) = target_pacing {
+            ctx = ctx.with_target_pacing(policy.clone());
+        }
         match &self.credential {
             Some(credential) => ctx.with_credential(credential.clone()),
             None => ctx,

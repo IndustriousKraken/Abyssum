@@ -9,9 +9,13 @@
 //! An **opt-in active brute-force** source (e02) complements the passive one: it
 //! joins the seeded `subdomains` wordlist onto the apex, tests each candidate for
 //! existence via DNS-over-HTTPS (through the same paced request path, so no DNS
-//! resolver dependency is added and the traffic is paced like everything else), and
-//! routes the confirmed-existing names into the *same* liveness + takeover
-//! evaluation as passively-discovered ones. It is **disabled by default**
+//! resolver dependency is added), and routes the confirmed-existing names into the
+//! *same* liveness + takeover evaluation as passively-discovered ones. The DoH
+//! existence tests and the passive CT-log query are **support-infrastructure
+//! lookups** — third-party services queried to map the target — so they ride the
+//! faster support pacing lane rather than the conservative target floor; the
+//! subsequent liveness/takeover probes go to the discovered hosts and are target
+//! traffic. It is **disabled by default**
 //! (`scanning.subdomain_bruteforce`): reconnaissance stays passive unless the
 //! operator turns it on — conservative-by-default, aggression opt-in.
 //!
@@ -60,6 +64,13 @@ use crate::source_availability::{self, SourceIssue};
 /// The stable scanner id. The registry keys on this and a scan selects by it; it
 /// must never change.
 const ID: &str = "subdomain_recon";
+
+/// The per-scan option key that toggles active subdomain brute-force for one scan
+/// (g06). A surface sets it on the scan's [`ScanOptions`](abyssum_core::ScanOptions)
+/// — the web scan-form checkbox, the CLI `--bruteforce` flag — and the scanner reads
+/// it here to decide whether the brute-force pass runs, falling back to the global
+/// `scanning.subdomain_bruteforce` default when the option is unset.
+pub const SUBDOMAIN_BRUTEFORCE_OPTION: &str = "subdomain_bruteforce";
 
 /// Names for the external sources this scanner relies on, used when reporting that
 /// one was unavailable so an empty result is never mistaken for "no subdomains".
@@ -373,10 +384,15 @@ impl BaseScanner for SubdomainReconScanner {
         let mut candidates = normalize_candidates(raw, &apex);
 
         // Active brute-force is opt-in and OFF by default: only when the operator
-        // has enabled it does reconnaissance leave the passive path. Confirmed-
-        // existing brute-force candidates join the same probe set, so they flow
-        // into the identical liveness + takeover evaluation as passive ones.
-        if ctx.config().scanning.subdomain_bruteforce {
+        // has enabled it does reconnaissance leave the passive path. The per-scan
+        // option (g06) decides it for this scan, falling back to the global
+        // `scanning.subdomain_bruteforce` default when unset. Confirmed-existing
+        // brute-force candidates join the same probe set, so they flow into the
+        // identical liveness + takeover evaluation as passive ones.
+        if bruteforce_enabled(
+            ctx.options().get(SUBDOMAIN_BRUTEFORCE_OPTION),
+            ctx.config().scanning.subdomain_bruteforce,
+        ) {
             let confirmed = self
                 .bruteforce(&apex, &candidates, ctx, &mut source_issues)
                 .await?;
@@ -602,6 +618,19 @@ where
     out
 }
 
+/// Whether the active brute-force pass runs for this scan. The per-scan
+/// [`SUBDOMAIN_BRUTEFORCE_OPTION`] wins when it carries a recognized truthy/falsy
+/// value; otherwise the global `scanning.subdomain_bruteforce` `config_default`
+/// applies. A blank or unrecognized value falls back to the default rather than
+/// silently enabling brute-force — conservative-by-default, aggression opt-in.
+fn bruteforce_enabled(option: Option<&str>, config_default: bool) -> bool {
+    match option.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "on" | "yes") => true,
+        Some(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
+        _ => config_default,
+    }
+}
+
 /// Truncate `candidates` to at most `cap`, returning the kept prefix and how many
 /// were dropped. Splitting this out of `scan` keeps the cap-and-log decision
 /// unit-testable without issuing any requests.
@@ -721,8 +750,12 @@ async fn doh_resolves(
         .clear()
         .append_pair("name", host)
         .append_pair("type", "A");
-    // The DoH JSON API is selected by the `application/dns-json` Accept header.
-    let spec = RequestSpec::get(url).header("Accept", "application/dns-json");
+    // The DoH JSON API is selected by the `application/dns-json` Accept header. This
+    // is a query to a public resolver to *map* the target, not traffic to the target
+    // itself, so it rides the faster support-infrastructure pacing lane.
+    let spec = RequestSpec::get(url)
+        .header("Accept", "application/dns-json")
+        .support_lookup();
 
     match probe(ctx, spec).await {
         Ok(response) if (200..300).contains(&response.status) => {
@@ -783,7 +816,9 @@ async fn crtsh_query(
         .append_pair("q", &format!("%.{apex}"))
         .append_pair("output", "json");
 
-    let response = match probe(ctx, RequestSpec::get(url)).await {
+    // The passive CT-log aggregator is a third-party source queried to map the
+    // target, so it uses the support-infrastructure pacing lane, not the target floor.
+    let response = match probe(ctx, RequestSpec::get(url).support_lookup()).await {
         Ok(response) => response,
         // Cancellation is not a source failure: surface it rather than masking a
         // cancelled scan as 'no candidates' (matches doh_resolves / the probe loop).
@@ -1082,6 +1117,30 @@ mod tests {
                 "dev.example.com".to_string(),  // stray dots stripped before join
             ]
         );
+    }
+
+    // --- Per-scan brute-force toggle (g06) -------------------------------------
+
+    #[test]
+    fn bruteforce_toggle_reads_per_scan_option_then_falls_back_to_config() {
+        // Unset → the global default applies, either way.
+        assert!(!bruteforce_enabled(None, false));
+        assert!(bruteforce_enabled(None, true));
+        // Blank or unrecognized → the global default, never a silent enable.
+        assert!(!bruteforce_enabled(Some("  "), false));
+        assert!(!bruteforce_enabled(Some("maybe"), false));
+        assert!(bruteforce_enabled(Some("maybe"), true));
+        // A truthy per-scan option enables even when the global default is off.
+        for on in ["1", "true", "TRUE", " on ", "yes"] {
+            assert!(bruteforce_enabled(Some(on), false), "{on:?} should enable");
+        }
+        // A falsy per-scan option disables even when the global default is on.
+        for off in ["0", "false", "off", "no"] {
+            assert!(
+                !bruteforce_enabled(Some(off), true),
+                "{off:?} should disable"
+            );
+        }
     }
 
     // --- DoH existence parsing (task 3) ----------------------------------------

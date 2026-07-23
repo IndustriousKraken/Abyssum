@@ -26,6 +26,7 @@ async fn full_run_persists_session_and_all_formats_agree() {
         identities: vec![],
         cookie: None,
         bearer: None,
+        bruteforce: false,
         min_delay: None,
         max_delay: None,
         log_level: None,

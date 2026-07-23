@@ -9,7 +9,8 @@
 
 use abyssum_core::custom_request::RequestOutcome;
 use abyssum_core::{
-    Finding, Note, ScanSession, SessionStatus, Severity, Summary, Tag, TagUsage, User,
+    Finding, Note, PacingPolicy, ScanSession, SessionStatus, Severity, Summary, Tag, TagUsage,
+    TimingProfile, User,
 };
 use uuid::Uuid;
 
@@ -36,6 +37,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
             "<nav><span class=\"brand\">Abyssum</span>\
              <a href=\"/scan\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
+             <a href=\"/timing-profiles\">Timing</a>\
              <span class=\"muted\">{name}{admin}</span>\
              <form method=\"post\" action=\"/logout\" style=\"display:inline\">\
              {csrf}<button type=\"submit\">Log out</button></form></nav>",
@@ -124,14 +126,33 @@ pub fn register(csrf: &str, error: Option<&str>) -> String {
     page("Register", None, &body)
 }
 
-/// The start-scan page: pick scanners + targets and submit.
-pub fn scan_page(user: &User, csrf: &str, scanner_ids: &[String]) -> String {
+/// The start-scan page: pick scanners + targets, choose a timing profile, submit.
+pub fn scan_page(
+    user: &User,
+    csrf: &str,
+    scanner_ids: &[String],
+    profiles: &[TimingProfile],
+) -> String {
     let options = scanner_ids
         .iter()
         .map(|id| {
             format!(
                 "<label><input type=\"checkbox\" name=\"scanners\" value=\"{v}\"> {v}</label>",
                 v = esc(id)
+            )
+        })
+        .collect::<String>();
+    // The pacing selector: the conservative default plus each of the user's own
+    // profiles. The value carried is the profile id, resolved server-side to a
+    // policy (a blank selection ⇒ the conservative default).
+    let profile_options = profiles
+        .iter()
+        .map(|p| {
+            format!(
+                "<option value=\"{id}\">{name} — {desc}</option>",
+                id = p.id,
+                name = esc(&p.name),
+                desc = esc(&describe_policy(&p.policy)),
             )
         })
         .collect::<String>();
@@ -142,10 +163,120 @@ pub fn scan_page(user: &User, csrf: &str, scanner_ids: &[String]) -> String {
            <textarea name=\"targets\" rows=\"4\" cols=\"60\" required \
              placeholder=\"https://api.example.com\"></textarea></label>\
          <fieldset><legend>Scanners</legend>{options}</fieldset>\
+         <fieldset><legend>Pacing</legend>\
+           <label>Timing profile \
+             <select name=\"opt.timing_profile\">\
+               <option value=\"\">Conservative default</option>{profile_options}\
+             </select></label> \
+           <a href=\"/timing-profiles\" class=\"muted\">Manage profiles</a>\
+         </fieldset>\
+         <fieldset><legend>Subdomain reconnaissance</legend>\
+           <label><input type=\"checkbox\" name=\"opt.subdomain_bruteforce\" value=\"true\"> \
+             Active subdomain brute-force (opt-in; off by default, stays passive otherwise)</label>\
+         </fieldset>\
          <button type=\"submit\">Start scan</button></form>",
         csrf = csrf_field(csrf),
     );
     page("Start a scan", Some(user), &body)
+}
+
+/// The timing-profiles management page: the user's reusable pacing shapes, each
+/// with an inline adjust form, plus an add-a-profile form. Private to the user.
+pub fn timing_profiles_page(user: &User, csrf: &str, profiles: &[TimingProfile]) -> String {
+    let rows = profiles
+        .iter()
+        .map(|p| {
+            let (shape, min, max) = policy_form_values(&p.policy);
+            let builtin = if p.built_in {
+                " <span class=\"muted\">(built-in)</span>"
+            } else {
+                ""
+            };
+            format!(
+                "<li><form method=\"post\" action=\"/timing-profiles/{id}\">{csrf}\
+                   <input name=\"name\" value=\"{name}\" required>{builtin} \
+                   <select name=\"shape\">{shape_opts}</select> \
+                   <input name=\"min\" type=\"number\" step=\"0.01\" min=\"0\" value=\"{min}\"> to \
+                   <input name=\"max\" type=\"number\" step=\"0.01\" min=\"0\" value=\"{max}\"> s \
+                   <button type=\"submit\">Save</button></form></li>",
+                id = p.id,
+                csrf = csrf_field(csrf),
+                name = esc(&p.name),
+                shape_opts = shape_options(shape),
+                min = fmt_secs(min),
+                max = fmt_secs(max),
+            )
+        })
+        .collect::<String>();
+    let body = format!(
+        "<h1>Timing profiles</h1>\
+         <p class=\"muted\">Reusable pacing shapes for your scans — only you can see or use \
+           these. Organic profiles draw irregular, heavy-tailed gaps that avoid a detectable \
+           cadence. Adaptive backoff and the target-distress halt apply under every profile.</p>\
+         <ul class=\"profiles\">{rows}</ul>\
+         <h2>Add a profile</h2>\
+         <form method=\"post\" action=\"/timing-profiles\">{csrf}\
+           <label>Name <input name=\"name\" required></label> \
+           <label>Shape <select name=\"shape\">{default_shape}</select></label> \
+           <label>Min delay (s) \
+             <input name=\"min\" type=\"number\" step=\"0.01\" min=\"0\" value=\"1\"></label> \
+           <label>Max delay (s) \
+             <input name=\"max\" type=\"number\" step=\"0.01\" min=\"0\" value=\"3\"></label> \
+           <button type=\"submit\">Add profile</button></form>",
+        rows = rows,
+        csrf = csrf_field(csrf),
+        default_shape = shape_options("uniform"),
+    );
+    page("Timing profiles", Some(user), &body)
+}
+
+/// A short human description of a pacing policy for the selector labels.
+fn describe_policy(policy: &PacingPolicy) -> String {
+    match policy {
+        PacingPolicy::Uniform { min_secs, max_secs } => {
+            format!("uniform {}–{}s", fmt_secs(*min_secs), fmt_secs(*max_secs))
+        }
+        PacingPolicy::Organic {
+            min_secs, max_secs, ..
+        } => format!(
+            "organic {}–{}s, heavy-tailed",
+            fmt_secs(*min_secs),
+            fmt_secs(*max_secs)
+        ),
+    }
+}
+
+/// The (shape, min, max) triple the management form edits for a policy. Organic's
+/// extra knobs are derived on save, so the form exposes just the window + shape.
+fn policy_form_values(policy: &PacingPolicy) -> (&'static str, f64, f64) {
+    match policy {
+        PacingPolicy::Uniform { min_secs, max_secs } => ("uniform", *min_secs, *max_secs),
+        PacingPolicy::Organic {
+            min_secs, max_secs, ..
+        } => ("organic", *min_secs, *max_secs),
+    }
+}
+
+/// The `<option>`s for a shape `<select>`, marking `selected` current.
+fn shape_options(selected: &str) -> String {
+    ["uniform", "organic"]
+        .iter()
+        .map(|shape| {
+            let sel = if *shape == selected { " selected" } else { "" };
+            format!("<option value=\"{shape}\"{sel}>{shape}</option>")
+        })
+        .collect()
+}
+
+/// Format a delay in seconds without a trailing `.0` on whole numbers. A value
+/// outside `i64`'s exact range (or non-finite) falls back to the float formatter,
+/// so a huge stored delay never renders as a saturated `as i64` garbage integer.
+fn fmt_secs(secs: f64) -> String {
+    if secs.fract() == 0.0 && secs.abs() < i64::MAX as f64 {
+        format!("{}", secs as i64)
+    } else {
+        format!("{secs}")
+    }
 }
 
 /// The dashboard shell: statistics + sessions, each lazily loaded as a fragment.
