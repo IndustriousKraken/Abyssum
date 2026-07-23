@@ -3,16 +3,19 @@
 ## ADDED Requirements
 
 ### Requirement: Reconnaissance Stays Within The Target's Apex
-The system SHALL only issue requests to hosts that are the target's apex domain or a
-subdomain of it. Every candidate host, regardless of the source it came from — passive
-discovery, wordlist brute-force, or any future source — SHALL be discarded before any request
-is made if it is not within that apex. The number of candidates discarded as out of scope
-SHALL be recorded rather than silently ignored.
+The system SHALL, when reconnaissance derives candidate hosts to probe — from passive
+discovery, wordlist brute-force, or any future candidate source — retain only those hosts that
+are the target's apex domain or a subdomain of it, and SHALL discard every other candidate
+before any request is made to it. The number of candidates discarded as out of scope SHALL be
+recorded rather than silently ignored. This constraint governs hosts derived from discovery
+candidates; it SHALL NOT be read to restrict requests the scanner deliberately directs at a
+chosen endpoint — such as probing a cloud-provider storage endpoint for the target's assets —
+which remain governed by their own requirements.
 
 #### Scenario: A candidate outside the apex is discarded
-- **GIVEN** a discovery source returns a name that is not the target's apex or a subdomain of it
+- **GIVEN** a discovery source returns a candidate host that is not the target's apex or a subdomain of it
 - **WHEN** reconnaissance evaluates its candidates
-- **THEN** that name SHALL be discarded
+- **THEN** that candidate SHALL be discarded
 - **AND** no request SHALL be issued to it
 
 #### Scenario: A subdomain of the apex is kept
@@ -24,6 +27,11 @@ SHALL be recorded rather than silently ignored.
 - **GIVEN** one or more candidates were discarded as outside the apex
 - **WHEN** reconnaissance completes
 - **THEN** the number discarded SHALL be recorded rather than silently dropped
+
+#### Scenario: A deliberate provider-endpoint probe is not a discovery candidate
+- **GIVEN** cloud-asset discovery probes a known cloud-provider storage endpoint for the target's assets
+- **WHEN** that request is issued
+- **THEN** the apex constraint on discovery candidates SHALL NOT discard it, because it is a deliberately chosen endpoint rather than a discovered host candidate
 
 ### Requirement: Candidate Names Cannot Redirect A Request
 The system SHALL constrain candidate names to valid DNS labels and SHALL construct each
