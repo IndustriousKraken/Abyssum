@@ -78,9 +78,11 @@ if [ -f /etc/systemd/system/abyssum-web.service ] && command -v systemctl >/dev/
 fi
 
 # --- generated Caddy config (only what install.sh marked) ---
+removed_proxy=0
 for cf in /etc/caddy/Caddyfile /etc/caddy/abyssum.caddyfile; do
   if [ -f "$cf" ] && grep -q 'abyssum-managed' "$cf" 2>/dev/null; then
     del "$cf"
+    removed_proxy=1
     command -v systemctl >/dev/null 2>&1 && $SUDO systemctl reload caddy >/dev/null 2>&1 || true
   fi
 done
@@ -99,3 +101,13 @@ if [ "$PURGE" -eq 1 ]; then
 fi
 
 echo "uninstall.sh: done."
+
+# Caddy's local CA is shared by every `tls internal` site on this host, so removing it
+# here could break unrelated services. Report it and leave the decision to the operator.
+if [ "$removed_proxy" -eq 1 ]; then
+  echo
+  echo "note: Caddy's local certificate authority is still trusted on this host."
+  echo "      It is shared with any other 'tls internal' Caddy site, so it was NOT removed."
+  echo "      If nothing else here uses Caddy's internal TLS, remove it with:"
+  echo "          sudo caddy untrust"
+fi

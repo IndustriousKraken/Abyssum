@@ -93,5 +93,26 @@ for bin in abyssum abyssum-web; do
 done
 echo "PASS: uninstall removed the user-scope binaries"
 
+# --- guard: the installer must never bind the web surface off loopback ---
+# The app is always on 127.0.0.1; network reach comes from the reverse proxy. A
+# generated unit that sets ABYSSUM_SERVER_HOST would silently undo that.
+if grep -qE '^[[:space:]]*Environment=ABYSSUM_SERVER_HOST' "$INSTALL"; then
+  fail "install.sh emits an ABYSSUM_SERVER_HOST bind into the generated unit"
+fi
+if grep -qE '^[[:space:]]*--expose\)' "$INSTALL"; then
+  fail "install.sh still accepts an app-level --expose flag"
+fi
+echo "PASS: installer never binds the web surface off loopback"
+
+# --- guard: the uninstaller REPORTS the shared Caddy CA but must never remove it ---
+# Caddy's local CA is shared by every `tls internal` site on the host, so running
+# `caddy untrust` here could break unrelated services.
+grep -q 'caddy untrust' "${ROOT}/uninstall.sh" \
+  || fail "uninstall.sh no longer tells the operator how to remove the trusted CA"
+if grep -qE '^[[:space:]]*(\$SUDO[[:space:]]+)?caddy[[:space:]]+untrust' "${ROOT}/uninstall.sh"; then
+  fail "uninstall.sh executes 'caddy untrust' — it must only report it"
+fi
+echo "PASS: uninstaller reports the shared CA without removing it"
+
 rm -rf "$smoke_fix" "$smoke_home" "$neg_fix" "$neg_home" "$uninstall_home"
 echo "ALL INSTALLER TESTS PASSED"

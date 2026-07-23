@@ -31,10 +31,10 @@ Options (pass through `curl … | bash -s --`):
 
 - `--user` — install into `~/.local/bin`
 - `--version <tag>` — install a specific release instead of the latest
-- `--service` — run `abyssum-web` as a systemd service (Linux)
-- `--expose localhost|all|<ip>` — how the web UI binds (default `localhost`)
-- `--allow-cidr <cidr>` — restrict network access to a CIDR (applied by the proxy)
+- `--service` — run `abyssum-web` as a systemd service (always bound to `127.0.0.1`)
 - `--proxy` `--site <host>` — set up a Caddy HTTPS reverse proxy (internal, self-signed CA)
+- `--proxy-bind all|loopback` — which addresses the **proxy** serves on (default `all`)
+- `--allow-cidr <cidr>` — restrict access to a CIDR (enforced at the proxy)
 - `--yes` / `--no-wizard` — accept defaults / never prompt
 
 A full one-shot setup behind HTTPS, unattended:
@@ -56,6 +56,11 @@ curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/un
 
 Removes the binaries, the service, and any proxy config the installer generated. Your data
 is kept unless you add `--purge`.
+
+If you set up the proxy, Caddy's local certificate authority stays in your system trust
+store — it's shared with any other `tls internal` Caddy site, so the uninstaller reports it
+rather than breaking those. Remove it yourself with `sudo caddy untrust` if nothing else
+here uses Caddy's internal TLS.
 
 ### From source
 
@@ -147,10 +152,10 @@ admin), and shows live scan progress over a WebSocket. Change the bind address i
 
 ## Deployment (service + HTTPS)
 
-`abyssum-web` binds `127.0.0.1` by default — safe, but localhost-only, which makes its
-multi-user accounts pointless unless everyone shares one keyboard. The supported way to
-give a team access is to keep the app on localhost and put a **TLS reverse proxy** in
-front; `abyssum-web` speaks plain HTTP on purpose and leaves TLS to the proxy.
+`abyssum-web` **always binds `127.0.0.1`** — it never listens on the network itself. That
+makes its multi-user accounts pointless unless everyone shares one keyboard, so the way to
+give a team access is a **TLS reverse proxy** in front: the app speaks plain HTTP on purpose
+and leaves TLS, and all network reach, to the proxy.
 
 The installer does both — run it in a terminal and accept the prompts, or one-shot it:
 
@@ -160,9 +165,12 @@ curl -fsSL …/install.sh | bash -s -- --service --proxy --site abyssum.lab --ye
 
 That runs `abyssum-web` as a systemd service on `127.0.0.1` and stands up a [Caddy](https://caddyserver.com)
 reverse proxy with an internal (self-signed) CA — ideal for a LAN or VPN with no public DNS.
-Trust Caddy's root CA on each client to avoid browser warnings. To expose the app directly
-instead (trusted networks only — plain HTTP), use `--expose all` or `--expose <ip>`, or
-`--allow-cidr` to limit access to a range.
+Trust Caddy's root CA on each client to avoid browser warnings.
+
+Who can reach it is a **proxy** setting, not an app setting: `--proxy-bind all` (default)
+serves on every address, `--proxy-bind loopback` keeps even the proxy off the wire (reach it
+over an SSH tunnel), and `--allow-cidr <cidr>` limits access to one range. Without a proxy the
+UI answers only on the host itself — by design.
 
 The full walkthrough — CA trust for other machines, DNS/hosts, systemd hardening, and the
 reference `deploy/` files — is in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).

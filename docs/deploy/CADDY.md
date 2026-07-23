@@ -48,6 +48,11 @@ edit by hand instead.
 
 ## Trusting the internal CA on other machines
 
+> **On removal:** the uninstaller does **not** run `caddy untrust`. That CA is shared by
+> every `tls internal` site on the host, so removing it could break unrelated Caddy
+> services. The uninstaller reports it and leaves the call to you —
+> `sudo caddy untrust` if nothing else here uses Caddy's internal TLS.
+
 `caddy trust` only trusts the CA on the machine it runs on. Every *other* client that
 connects needs Caddy's root certificate imported, or it will show a certificate
 warning. Export the root once from the server:

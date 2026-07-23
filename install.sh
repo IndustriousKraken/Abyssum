@@ -26,7 +26,7 @@ USER_INSTALL=0
 # Setup selections. DO_* empty = "ask if interactive, else skip".
 DO_SERVICE=""          # 1 | 0
 DO_PROXY=""            # 1 | 0
-EXPOSE="localhost"     # localhost | all | <ip>
+PROXY_BIND="all"       # all | loopback — which addresses the PROXY serves on
 ALLOW_CIDR=""
 SITE=""
 ASSUME_YES=0
@@ -44,11 +44,13 @@ Install options:
   --user               install into ~/.local/bin instead of /usr/local/bin
 
 Setup options (Linux/systemd; supplying any of these implies non-interactive setup):
-  --service            run abyssum-web as a systemd service
-  --expose <where>     localhost (default) | all | <ip>  — how the web UI binds
-  --allow-cidr <cidr>  restrict network access to this CIDR (applied by --proxy)
+  --service            run abyssum-web as a systemd service (always bound to 127.0.0.1)
   --proxy              set up a Caddy HTTPS reverse proxy (internal, self-signed CA)
   --site <host|ip>     hostname/IP for the proxy (default: this host's primary IP)
+  --proxy-bind <where> all (default) | loopback — which addresses the PROXY serves on
+  --allow-cidr <cidr>  restrict access to this CIDR (enforced at the proxy)
+
+The web UI itself always stays on 127.0.0.1; network reach comes from the proxy.
   --yes, -y            accept defaults / skip confirmations
   --no-wizard          never prompt (binaries only unless setup flags are given)
 
@@ -70,7 +72,7 @@ while [ $# -gt 0 ]; do
     --no-service) DO_SERVICE=0; HAVE_SETUP_FLAG=1; shift ;;
     --proxy) DO_PROXY=1; HAVE_SETUP_FLAG=1; shift ;;
     --no-proxy) DO_PROXY=0; HAVE_SETUP_FLAG=1; shift ;;
-    --expose) EXPOSE="${2:?--expose needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
+    --proxy-bind) PROXY_BIND="${2:?--proxy-bind needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
     --allow-cidr) ALLOW_CIDR="${2:?--allow-cidr needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
     --site) SITE="${2:?--site needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -212,44 +214,43 @@ run_wizard() {
   echo
   echo "Optional setup (press Enter for the default):"
   if ask "  Run abyssum-web as a systemd service? [Y/n]" "Y"; then DO_SERVICE=1; else DO_SERVICE=0; fi
-  if [ "${DO_SERVICE:-0}" = "1" ]; then
-    printf '  Expose the web UI on [1] localhost (default) [2] all interfaces [3] this host IP: ' > /dev/tty
-    local choice; read -r choice < /dev/tty || choice=""
-    case "${choice:-1}" in
-      2) EXPOSE="all" ;;
-      3) EXPOSE="$(detect_ip)" ;;
-      *) EXPOSE="localhost" ;;
-    esac
-  fi
-  if ask "  Set up a Caddy HTTPS reverse proxy? [y/N]" "N"; then
+
+  # The web UI always stays on 127.0.0.1. The only network question is what the
+  # PROXY serves to, so it is asked solely when the proxy is chosen.
+  local d; d="$(detect_ip)"
+  if ask "  Make it reachable from other machines (Caddy HTTPS reverse proxy)? [y/N]" "N"; then
     DO_PROXY=1
-    local d; d="$(detect_ip)"
-    printf '  Site hostname or IP [%s]: ' "$d" > /dev/tty
+    printf '  Site hostname or IP for HTTPS [%s]: ' "$d" > /dev/tty
     local s; read -r s < /dev/tty || s=""
     SITE="${s:-$d}"
+
+    printf '  Serve it on [1] all addresses (default) [2] loopback only (for an SSH tunnel): ' > /dev/tty
+    local choice; read -r choice < /dev/tty || choice=""
+    case "${choice:-1}" in
+      2) PROXY_BIND="loopback" ;;
+      *) PROXY_BIND="all" ;;
+    esac
+
+    printf '  Restrict access to a CIDR (blank for no restriction): ' > /dev/tty
+    local c; read -r c < /dev/tty || c=""
+    ALLOW_CIDR="$c"
+    echo "  -> the app stays on 127.0.0.1; Caddy serves it over HTTPS."
   else
     DO_PROXY=0
+    echo "  -> the web UI will be reachable only from this host (127.0.0.1)."
   fi
 }
 
 setup_service() {
   STEP="installing systemd service"
   command -v systemctl >/dev/null 2>&1 || { echo "install.sh: systemd not found; skipping service." >&2; return 0; }
-  local runuser bin unit host protecthome hostline
+  local runuser bin unit protecthome
   runuser="${SUDO_USER:-$(id -un)}"
   bin="${bin_dir}/abyssum-web"
   unit="/etc/systemd/system/abyssum-web.service"
-  case "$EXPOSE" in
-    localhost|"") host="127.0.0.1" ;;
-    all) host="0.0.0.0" ;;
-    *) host="$EXPOSE" ;;
-  esac
   case "$bin" in /home/*) protecthome="read-only" ;; *) protecthome="true" ;; esac
-  if [ "$host" = "127.0.0.1" ]; then
-    hostline="# Environment=ABYSSUM_SERVER_HOST=127.0.0.1"
-  else
-    hostline="Environment=ABYSSUM_SERVER_HOST=${host}"
-  fi
+  # Deliberately no ABYSSUM_SERVER_HOST: the web surface keeps its loopback default.
+  # Network reach comes from the reverse proxy, never from binding the app out.
   $SUDO tee "$unit" >/dev/null <<EOF
 [Unit]
 Description=Abyssum web UI
@@ -261,7 +262,6 @@ Type=simple
 User=${runuser}
 ExecStart=${bin}
 Environment=ABYSSUM_DATABASE_PATH=/var/lib/abyssum/abyssum.db
-${hostline}
 StateDirectory=abyssum
 Restart=on-failure
 RestartSec=5
@@ -275,7 +275,7 @@ WantedBy=multi-user.target
 EOF
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now abyssum-web
-  echo "install.sh: abyssum-web service installed and started (User=${runuser}, bind=${host})."
+  echo "install.sh: abyssum-web service installed and started (User=${runuser}, bound to 127.0.0.1)."
 }
 
 setup_proxy() {
@@ -293,25 +293,51 @@ setup_proxy() {
   else
     body="    reverse_proxy 127.0.0.1:8000"
   fi
+  # --proxy-bind loopback keeps the proxy itself off the network (SSH-tunnel use).
   local generated
-  generated="$(printf '# abyssum-managed (install.sh) — safe to remove via uninstall.sh\nhttps://%s {\n    tls internal\n    encode zstd gzip\n    header -Server\n%s\n}\n' "$SITE" "$body")"
+  generated="# abyssum-managed (install.sh) — safe to remove via uninstall.sh
+https://${SITE} {"
+  if [ "$PROXY_BIND" = "loopback" ]; then
+    generated="${generated}
+    bind 127.0.0.1"
+  fi
+  generated="${generated}
+    tls internal
+    encode zstd gzip
+    header -Server
+${body}
+}"
 
   local cf=/etc/caddy/Caddyfile
   $SUDO mkdir -p /etc/caddy
   if [ -f "$cf" ] && ! $SUDO grep -q 'abyssum-managed' "$cf" 2>/dev/null; then
-    # Don't clobber a hand-written Caddyfile: drop a sibling and ask for an import.
-    printf '%s' "$generated" | $SUDO tee /etc/caddy/abyssum.caddyfile >/dev/null
-    echo "install.sh: existing /etc/caddy/Caddyfile left intact; wrote /etc/caddy/abyssum.caddyfile." >&2
-    echo "install.sh: add 'import abyssum.caddyfile' to your Caddyfile, then reload caddy." >&2
+    # A hand-written Caddyfile already fronts abyssum-web — leave it as-is.
+    if $SUDO grep -q '127.0.0.1:8000' "$cf" 2>/dev/null; then
+      echo "install.sh: /etc/caddy/Caddyfile already proxies abyssum-web (127.0.0.1:8000); leaving it as-is."
+      $SUDO systemctl reload caddy >/dev/null 2>&1 || true
+      return 0
+    fi
+    # Otherwise don't clobber it: drop a sibling and tell the operator to import it.
+    printf '%s\n' "$generated" | $SUDO tee /etc/caddy/abyssum.caddyfile >/dev/null
+    echo "install.sh: your /etc/caddy/Caddyfile was left intact; wrote /etc/caddy/abyssum.caddyfile." >&2
+    echo "install.sh: to activate the proxy, add this line to /etc/caddy/Caddyfile and reload caddy:" >&2
+    echo "    import abyssum.caddyfile" >&2
     return 0
   fi
-  printf '%s' "$generated" | $SUDO tee "$cf" >/dev/null
+  printf '%s\n' "$generated" | $SUDO tee "$cf" >/dev/null
   $SUDO caddy validate --adapter caddyfile --config "$cf" \
     || { echo "install.sh: generated Caddyfile failed validation." >&2; return 1; }
   if $SUDO systemctl list-unit-files caddy.service >/dev/null 2>&1; then
     $SUDO systemctl reload caddy 2>/dev/null || $SUDO systemctl restart caddy
   fi
-  $SUDO caddy trust >/dev/null 2>&1 || true
+  # Announce this: it modifies the host's system trust store, and the uninstaller's
+  # closing note refers back to it.
+  if $SUDO caddy trust >/dev/null 2>&1; then
+    echo "install.sh: added Caddy's local certificate authority to this host's trust store."
+    echo "install.sh: other machines need that CA imported — see docs/deploy/CADDY.md."
+  else
+    echo "install.sh: could not add Caddy's CA to the trust store; browsers will warn until you run 'sudo caddy trust'." >&2
+  fi
   echo "install.sh: Caddy proxy configured for https://${SITE}/ (internal CA)."
 }
 
@@ -330,9 +356,7 @@ if [ "$run_setup" -eq 1 ]; then
   if [ "$os" != "Linux" ]; then
     echo "install.sh: service/proxy setup is Linux/systemd only; skipping." >&2
   else
-    # The reverse proxy is the network face: keep the app on localhost regardless
-    # of --expose (the exposure/CIDR are enforced at the proxy).
-    [ "${DO_PROXY:-0}" = "1" ] && EXPOSE="localhost"
+    # The web surface is always on loopback; the proxy carries all network reach.
     [ "${DO_SERVICE:-0}" = "1" ] && setup_service
     [ "${DO_PROXY:-0}" = "1" ] && setup_proxy
   fi
