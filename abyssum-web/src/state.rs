@@ -12,12 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use abyssum_core::{
-    AnnotationStore, AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter,
-    ScannerRegistry, TimingProfileStore,
+    AnnotationStore, AuthManager, Config, CustomWordlistStore, DatabaseManager, EngagementStore,
+    Orchestrator, RateLimiter, ScannerRegistry, TimingProfileStore,
 };
 use abyssum_scanners::register_builtins;
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::HeaderValue;
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::Response;
@@ -43,6 +43,11 @@ pub struct AppState {
     pub annotations: AnnotationStore,
     /// Per-user timing profiles (reusable pacing shapes), gated by owner.
     pub timing: TimingProfileStore,
+    /// Per-user custom wordlists (imported reference lists), gated by owner.
+    pub wordlists: CustomWordlistStore,
+    /// Engagements: scan groupings + scope/authorization documents, gated by the
+    /// engagement's authorized-operator set (admin sees all).
+    pub engagements: EngagementStore,
     /// The scan engine, shared so background runs and handlers drive one engine.
     pub orchestrator: Arc<Orchestrator>,
     /// Live per-session progress fan-out for the WebSocket endpoint.
@@ -67,6 +72,8 @@ impl AppState {
         let auth = AuthManager::from_database(&db, &config);
         let annotations = AnnotationStore::from_database(&db);
         let timing = TimingProfileStore::from_database(&db);
+        let wordlists = CustomWordlistStore::from_database(&db);
+        let engagements = EngagementStore::from_database(&db);
         let limiter = RateLimiter::from_config(&config.scanning);
         let orchestrator = Arc::new(Orchestrator::new(config.clone(), registry));
 
@@ -76,6 +83,8 @@ impl AppState {
             auth,
             annotations,
             timing,
+            wordlists,
+            engagements,
             orchestrator,
             hub: Hub::default(),
             limiter,
@@ -103,6 +112,9 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/scan/{id}", get(handlers::scan_detail))
         .route("/custom-requests", get(handlers::custom_page))
         .route("/timing-profiles", get(handlers::timing_profiles_page))
+        .route("/wordlists", get(handlers::wordlists_page))
+        .route("/engagements", get(handlers::engagements_page))
+        .route("/engagements/{id}", get(handlers::engagement_detail))
         .route("/logout", post(handlers::logout))
         .route_layer(from_fn_with_state(state.clone(), require_user_page));
 
@@ -121,6 +133,26 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/timing-profiles/{id}",
             post(handlers::update_timing_profile),
         )
+        // Custom-wordlist import (paste or .txt upload), owned by the user.
+        .route("/wordlists", post(handlers::import_wordlist))
+        // Engagements: create, attach a document, serve a document safely, and
+        // assign a scan to an engagement. All gated by the engagement's authorized
+        // operators (admin sees all) in the handlers.
+        .route("/engagements", post(handlers::create_engagement))
+        // Raise this route's request-body limit above axum's 2 MiB default, sized
+        // from `max_document_bytes`, so a legal document upload reaches the handler
+        // (and the store's clear size error) instead of a bare 413 from axum.
+        .route(
+            "/engagements/{id}/documents",
+            post(handlers::attach_document).layer(DefaultBodyLimit::max(
+                handlers::document_body_cap(state.config.server.max_document_bytes),
+            )),
+        )
+        .route(
+            "/engagements/{id}/documents/{doc_id}",
+            get(handlers::serve_document),
+        )
+        .route("/scan/{id}/assign", post(handlers::assign_scan))
         // Annotations: notes on sessions/findings, color tags, and the
         // note/tag-scoped session searches. All owner-gated in the handlers.
         .route(
@@ -203,11 +235,21 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 async fn security_headers(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
-    headers.insert(
-        "content-security-policy",
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
-    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // CSP and framing default to the strict page policy, but a handler MAY set its
+    // own first (the engagement document endpoint serves untrusted bytes with a
+    // `sandbox` CSP and allows same-origin framing so an uploaded PDF renders
+    // inline). Only fill these in when the handler left them unset, so that
+    // per-response override is not clobbered here.
+    if !headers.contains_key("content-security-policy") {
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
+    if !headers.contains_key("x-frame-options") {
+        headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    }
+    // MIME-sniffing is off on every response, without exception.
     headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),

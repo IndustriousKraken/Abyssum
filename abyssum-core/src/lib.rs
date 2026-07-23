@@ -22,6 +22,7 @@ pub mod config;
 pub(crate) mod csv;
 pub mod custom_request;
 pub mod diff;
+pub mod engagements;
 pub mod error;
 pub mod logging;
 pub mod persistence;
@@ -30,6 +31,7 @@ pub mod report;
 pub mod scan;
 pub mod seed;
 pub mod timing;
+pub mod wordlists;
 
 pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, DEFAULT_TAG_COLOR, Note, Tag, TagApply, TagUsage};
@@ -43,6 +45,10 @@ pub use custom_request::{
     SignalKind, analyze, execute as execute_custom_request, normalize_url,
 };
 pub use diff::{ChangedEntry, DiffEntry, SessionDiff, diff_sessions};
+pub use engagements::{
+    DocumentBlob, DocumentKind, Engagement, EngagementDocument, EngagementStore,
+    detect_document_type,
+};
 pub use error::{Error, Result};
 pub use persistence::{
     DEFAULT_SEARCH_LIMIT, DatabaseManager, FindingFilter, MAX_SEARCH_LIMIT, Summary,
@@ -60,3 +66,4 @@ pub use timing::{
     DEFAULT_PROFILE_NAME, TIMING_POLICY_OPTION, TimingProfile, TimingProfileStore, builtin_library,
 };
 pub use tokio_util::sync::CancellationToken;
+pub use wordlists::{CustomWordlist, CustomWordlistStore, ImportReport};

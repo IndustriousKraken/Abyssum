@@ -15,10 +15,17 @@ use abyssum_core::{
     TIMING_POLICY_OPTION, TagApply, Target, User, execute_custom_request, normalize_url,
     visible_session, visible_sessions,
 };
+use abyssum_scanners::WORDLIST_OPTION;
 use axum::Extension;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::http::header::{
+    CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+    X_FRAME_OPTIONS,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
+use base64::Engine;
 use serde::Deserialize;
 use tokio::net::lookup_host;
 use url::Host;
@@ -127,13 +134,28 @@ pub async fn scan_page(
 ) -> Response {
     let (csrf, set) = auth::ensure_csrf(&headers);
     let scanners = state.orchestrator.registry().available();
-    // The user's own timing profiles populate the pacing selector (private to them).
+    // The user's own timing profiles + custom wordlists populate the pacing and
+    // wordlist selectors (both private to them).
     let profiles = state
         .timing
         .list_for_user(user.id)
         .await
         .unwrap_or_default();
-    auth::html(view::scan_page(&user, &csrf, &scanners, &profiles), set)
+    let wordlists = state
+        .wordlists
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    // The user's authorized engagements populate the optional engagement selector.
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::scan_page(&user, &csrf, &scanners, &profiles, &wordlists, &engagements),
+        set,
+    )
 }
 
 /// `GET /` and `GET /dashboard` — stats + sessions + search shell; the default
@@ -162,10 +184,16 @@ pub async fn scan_detail(
         Ok(session) => session,
         Err(_) => return not_visible(),
     };
-    let (_csrf, set) = auth::ensure_csrf(&headers);
+    let (csrf, set) = auth::ensure_csrf(&headers);
     // A live scan's in-memory state is fresher than the (Pending) persisted row.
     let session = state.hub.snapshot(id).unwrap_or(persisted);
-    auth::html(view::scan_detail(&user, &session), set)
+    // The user's authorized engagements populate the "assign to engagement" form.
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
+    auth::html(view::scan_detail(&user, &csrf, &session, &engagements), set)
 }
 
 // --- Fragments -------------------------------------------------------------
@@ -366,6 +394,22 @@ pub async fn start_scan(
         options.set(TIMING_POLICY_OPTION, json);
     }
 
+    // Owner-scope the selected custom wordlist (g07): the scan form carries the
+    // chosen list's id under `opt.wordlist`, but the scanner trusts it, so keep it
+    // ONLY when it names one of this user's own lists. A missing, non-numeric, or
+    // foreign id is stripped, leaving the seeded default in force — a crafted id can
+    // never select (or read) another operator's list.
+    let wordlist_ok = match options
+        .get(WORDLIST_OPTION)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+    {
+        Some(id) => matches!(state.wordlists.get_for_user(user.id, id).await, Ok(Some(_))),
+        None => false,
+    };
+    if !wordlist_ok {
+        options.remove(WORDLIST_OPTION);
+    }
+
     // create_session_with_options validates every scanner id up front (unknown →
     // error, no session created), so an unknown id never issues traffic.
     let handle = match state
@@ -388,6 +432,14 @@ pub async fn start_scan(
     let snapshot = handle.lock().expect("session not poisoned").clone();
     if state.db.save_session(&snapshot).await.is_err() {
         return server_error();
+    }
+
+    // Optional engagement association chosen on the form. Best-effort: the store
+    // owner-scopes it, so a blank, non-numeric, or foreign id simply leaves the
+    // scan unassociated — it never blocks or alters the run (scope is reference
+    // material only). Requires the Pending row above so the session is visible.
+    if let Some(eid) = field(&form, "engagement").and_then(|v| v.trim().parse::<i64>().ok()) {
+        let _ = state.engagements.assign_session(&user, Some(eid), id).await;
     }
 
     spawn_scan(state.clone(), id, handle);
@@ -548,6 +600,83 @@ pub async fn update_timing_profile(
     }
 }
 
+// --- Custom wordlists ------------------------------------------------------
+
+/// A sane ceiling on one wordlist import's request body (name + CSRF + the pasted
+/// or uploaded text), rejected before parsing so a huge upload cannot exhaust
+/// memory. Comfortably holds a serious recon list (tens of thousands of lines).
+const MAX_WORDLIST_IMPORT_BYTES: usize = 1024 * 1024;
+
+/// `GET /wordlists` — the user's custom wordlists plus an import form (paste or
+/// `.txt` upload). Private to the user (owner-scoped).
+pub async fn wordlists_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    render_wordlists(&state, &user, &headers, None).await
+}
+
+/// `POST /wordlists` — import a wordlist owned by the authenticated user, from
+/// pasted text or an uploaded `.txt` file (both arrive as the `text` field; the
+/// browser reads a chosen file into it client-side). The import is normalized and
+/// the result reported on the re-rendered page rather than imported silently.
+pub async fn import_wordlist(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // Enforce the size ceiling before doing any work on the body.
+    if body.len() > MAX_WORDLIST_IMPORT_BYTES {
+        return fail_page(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "wordlist upload is too large (max 1 MiB)",
+        );
+    }
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("").to_string();
+    let text = field(&form, "text").unwrap_or("").to_string();
+
+    let notice = match state.wordlists.import(user.id, &name, &text).await {
+        Ok((list, report)) => format!(
+            "Imported \"{}\": {} entries stored, {} dropped \
+             ({} duplicates, {} blank, {} comments).",
+            list.name,
+            report.imported,
+            report.dropped(),
+            report.dropped_duplicate,
+            report.dropped_blank,
+            report.dropped_comment,
+        ),
+        Err(err) => format!("Import failed: {}", clean_err(err)),
+    };
+    render_wordlists(&state, &user, &headers, Some(notice)).await
+}
+
+/// Render the wordlists page for `user`, listing their lists and (optionally)
+/// surfacing an import notice. Shared by the GET page and the POST import result.
+async fn render_wordlists(
+    state: &AppState,
+    user: &User,
+    headers: &HeaderMap,
+    notice: Option<String>,
+) -> Response {
+    let (csrf, set) = auth::ensure_csrf(headers);
+    let lists = state
+        .wordlists
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::wordlists_page(user, &csrf, &lists, notice.as_deref()),
+        set,
+    )
+}
+
 /// Ceiling on a user-entered pacing delay: one day. Well beyond any realistic
 /// stealth pacing, but bounded so a finite-but-huge value (e.g. `1e300`) can never
 /// be stored and later overflow `Duration` when the profile paces its first request.
@@ -576,6 +705,276 @@ fn policy_from_form(form: &[(String, String)]) -> Result<PacingPolicy, String> {
         Some("organic") => PacingPolicy::organic(min, max),
         _ => PacingPolicy::uniform(min, max),
     })
+}
+
+// --- Engagements -----------------------------------------------------------
+
+/// `GET /engagements` — the operator's authorized engagements plus a create form
+/// (admin sees all). Private to the authorized set.
+pub async fn engagements_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    let (csrf, set) = auth::ensure_csrf(&headers);
+    let engagements = state
+        .engagements
+        .list_for_user(&user)
+        .await
+        .unwrap_or_default();
+    auth::html(view::engagements_page(&user, &csrf, &engagements), set)
+}
+
+/// `POST /engagements` — create an engagement owned by the authenticated operator.
+pub async fn create_engagement(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("");
+    match state.engagements.create(&user, name).await {
+        Ok(engagement) => auth::redirect(&format!("/engagements/{}", engagement.id), &[]),
+        Err(err) => fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
+    }
+}
+
+/// `GET /engagements/{id}` — one engagement: its associated scans and attached
+/// documents (owner/authorized-checked; a non-authorized viewer gets a 404).
+pub async fn engagement_detail(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    render_engagement_detail(&state, &user, id, &headers, None).await
+}
+
+/// Slack over twice the configured document cap for an upload's request body:
+/// base64 inflation (≈ ×1.34) plus urlencoding, so a legally-sized document never
+/// trips the transport ceiling before the store can weigh its decoded bytes.
+const DOCUMENT_BODY_SLACK: usize = 64 * 1024;
+
+/// The request-body ceiling for a document upload, derived from the configured
+/// `max_document_bytes`. Sizes the `/engagements/{id}/documents` route's
+/// [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) so axum does not reject a
+/// legal upload with a bare 413 before the handler runs (its default is 2 MiB,
+/// well under the ~13 MiB base64 body of a 10 MiB document). A realistically
+/// oversized document still reaches the store, which reports it with a clear
+/// message; only a body more than twice the cap is refused at the transport layer.
+pub(crate) fn document_body_cap(max_document_bytes: usize) -> usize {
+    max_document_bytes
+        .saturating_mul(2)
+        .saturating_add(DOCUMENT_BODY_SLACK)
+}
+
+/// `POST /engagements/{id}/documents` — attach a scope/authorization document:
+/// pasted text (`kind=text`), an external URL (`kind=url`), or an uploaded file
+/// (`kind=file`, its bytes base64/data-URL-encoded in `file_data`). Owner-scoped;
+/// the store rejects an oversized or disallowed upload without storing it.
+pub async fn attach_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // The request-body ceiling is enforced upstream by the route's
+    // `DefaultBodyLimit` (sized via `document_body_cap` from `max_document_bytes`),
+    // so by here the body is already within it. The real per-document bound is the
+    // configured `max_document_bytes`, applied by the store to the decoded bytes.
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+
+    let kind = field(&form, "kind").unwrap_or("text");
+    let result = match kind {
+        "url" => {
+            let url = field(&form, "url").unwrap_or("");
+            state.engagements.attach_url(&user, id, url).await
+        }
+        "file" => match decode_upload(field(&form, "file_data").unwrap_or("")) {
+            Ok(bytes) => {
+                let filename = field(&form, "file_name").unwrap_or("document");
+                state
+                    .engagements
+                    .attach_file(
+                        &user,
+                        id,
+                        filename,
+                        &bytes,
+                        state.config.server.max_document_bytes,
+                    )
+                    .await
+            }
+            Err(msg) => Err(abyssum_core::Error::Other(msg)),
+        },
+        // Default (and explicit "text"): pasted scope text.
+        _ => {
+            let content = field(&form, "content").unwrap_or("");
+            state.engagements.attach_text(&user, id, content).await
+        }
+    };
+
+    match result {
+        Ok(_) => auth::redirect(&format!("/engagements/{id}"), &[]),
+        // An authorization/visibility failure discloses nothing (404); a validation
+        // error (empty, oversized, disallowed type, bad URL) re-renders in place.
+        Err(abyssum_core::Error::Auth(_)) => not_visible(),
+        Err(err) => {
+            render_engagement_detail(&state, &user, id, &headers, Some(clean_err(err))).await
+        }
+    }
+}
+
+/// `GET /engagements/{id}/documents/{doc_id}` — serve an uploaded document's bytes
+/// **safely**: with the content type the engine detected from the bytes (never the
+/// client's claim, never `text/html`), sniffing disabled, a `Content-Disposition`,
+/// and a strict `sandbox` CSP that also allows same-origin framing so a PDF renders
+/// inline via the browser's native viewer. A viewer who may not see it gets a 404.
+pub async fn serve_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, doc_id)): Path<(i64, i64)>,
+) -> Response {
+    let blob = match state.engagements.document_blob(&user, id, doc_id).await {
+        Ok(blob) => blob,
+        Err(_) => return not_visible(),
+    };
+    // ponytail: `sandbox` gives the strongest isolation and modern browsers still
+    // render a PDF under it; the content-type + nosniff already stop the bytes
+    // executing as page content, so drop `sandbox` only if a browser's native PDF
+    // viewer ever fails to render inline under it.
+    Response::builder()
+        .header(CONTENT_TYPE, blob.content_type)
+        .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", blob.filename),
+        )
+        .header(
+            CONTENT_SECURITY_POLICY,
+            "default-src 'none'; frame-ancestors 'self'; sandbox",
+        )
+        .header(X_FRAME_OPTIONS, "SAMEORIGIN")
+        .body(Body::from(blob.bytes))
+        .unwrap_or_else(|_| server_error())
+}
+
+/// `POST /scan/{id}/assign` — associate an existing scan with an engagement (or
+/// clear its association when the field is blank). Both the scan and the chosen
+/// engagement must be visible to the operator; the store records who assigned it.
+pub async fn assign_scan(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    // A blank selection clears the association; otherwise a numeric engagement id.
+    let engagement = field(&form, "engagement")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok());
+    match state
+        .engagements
+        .assign_session(&user, engagement, id)
+        .await
+    {
+        Ok(()) => auth::redirect(&format!("/scan/{id}"), &[]),
+        Err(_) => not_visible(),
+    }
+}
+
+/// Render an engagement's detail page (its scans + documents), optionally with a
+/// notice from a failed document attach. Shared by the GET route and the attach
+/// error path. A viewer who may not see the engagement gets a 404.
+async fn render_engagement_detail(
+    state: &AppState,
+    user: &User,
+    id: i64,
+    headers: &HeaderMap,
+    notice: Option<String>,
+) -> Response {
+    let engagement = match state.engagements.get_for_user(user, id).await {
+        Ok(engagement) => engagement,
+        Err(_) => return not_visible(),
+    };
+    let (csrf, set) = auth::ensure_csrf(headers);
+    let sessions = state
+        .engagements
+        .sessions_for_engagement(user, id)
+        .await
+        .unwrap_or_default();
+    // Rollup scope: the engagement's sessions the operator may already see under
+    // per-user visibility (admin sees all; a non-admin only their own). This bounds
+    // the rollup to what the operator could otherwise view — an admin-assigned
+    // session owned by another operator is excluded for a non-admin.
+    let rollup_ids: Vec<Uuid> = sessions
+        .iter()
+        .filter(|s| user.is_admin() || s.owner_user_id == Some(user.id))
+        .map(|s| s.id)
+        .collect();
+    // Severity breakdown via the existing subset-restricted Summary Counts.
+    let rollup = state
+        .db
+        .summary(Some(&rollup_ids))
+        .await
+        .unwrap_or_else(|_| abyssum_core::Summary::empty());
+    // The findings across those sessions (persisted). ponytail: per-session fetch;
+    // a batched query is an optimization to add if engagements ever hold many scans.
+    let mut rollup_findings = Vec::new();
+    for sid in &rollup_ids {
+        if let Ok(mut fs) = state.db.get_findings(*sid).await {
+            rollup_findings.append(&mut fs);
+        }
+    }
+    let documents = state
+        .engagements
+        .documents(user, id)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::engagement_detail(
+            user,
+            &csrf,
+            &engagement,
+            &sessions,
+            &rollup,
+            &rollup_findings,
+            &documents,
+            notice.as_deref(),
+        ),
+        set,
+    )
+}
+
+/// Decode an uploaded file field into raw bytes. The browser submits the file as a
+/// base64 data URL (`data:<type>;base64,<payload>`) read client-side; a bare base64
+/// payload is accepted too. The declared type in the prefix is ignored — the store
+/// detects the real type from the decoded bytes.
+fn decode_upload(field_value: &str) -> Result<Vec<u8>, String> {
+    let value = field_value.trim();
+    if value.is_empty() {
+        return Err("no file was selected".to_string());
+    }
+    // Strip an optional `data:...,` prefix, keeping only the base64 payload.
+    let payload = match value.split_once(',') {
+        Some((prefix, rest)) if prefix.starts_with("data:") => rest,
+        _ => value,
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .map_err(|_| "the uploaded file could not be decoded".to_string())
 }
 
 // --- SSRF guard ------------------------------------------------------------
@@ -1092,8 +1491,13 @@ fn with_status(status: StatusCode, mut resp: Response) -> Response {
 }
 
 /// Strip the `Error` variant's prefix so the user sees the message, not the
-/// Rust error category.
+/// Rust error category. A storage failure is redacted to a generic message: its
+/// text is raw sqlx output (SQL, column, or constraint names) and must not leak to
+/// the operator. Every other variant's message is operator-facing.
 fn clean_err(err: abyssum_core::Error) -> String {
+    if let abyssum_core::Error::Database(_) = err {
+        return "a storage error occurred".to_string();
+    }
     let text = err.to_string();
     text.split_once(": ")
         .map(|(_, rest)| rest.to_string())
@@ -1244,6 +1648,22 @@ mod tests {
         // The ceiling itself is allowed (boundary), one past it is not.
         assert!(policy_from_form(&form("shape=uniform&min=0&max=86400")).is_ok());
         assert!(policy_from_form(&form("shape=uniform&min=0&max=86401")).is_err());
+    }
+
+    #[test]
+    fn clean_err_redacts_db_text_but_keeps_operator_messages() {
+        // A storage failure's raw sqlx text (SQL / constraint names) is never leaked.
+        let db = clean_err(abyssum_core::Error::Database(
+            "UNIQUE constraint failed: user_wordlists.name".to_string(),
+        ));
+        assert_eq!(db, "a storage error occurred");
+        // A validation message (Error::Other) still reaches the operator verbatim.
+        assert_eq!(
+            clean_err(abyssum_core::Error::Other(
+                "scope text is required".to_string()
+            )),
+            "scope text is required"
+        );
     }
 
     #[test]

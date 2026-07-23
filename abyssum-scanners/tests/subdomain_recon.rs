@@ -17,10 +17,13 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use abyssum_core::{
-    BaseScanner, Config, DatabaseManager, RateLimiter, ScanContext, ScanOptions, ScannerRegistry,
-    Severity, SingleUserAgent, Status, Target,
+    AuthConfig, AuthManager, BaseScanner, Config, CustomWordlistStore, DatabaseManager,
+    RateLimiter, ScanContext, ScanOptions, ScannerRegistry, Severity, SingleUserAgent, Status,
+    Target,
 };
-use abyssum_scanners::{SUBDOMAIN_BRUTEFORCE_OPTION, SubdomainReconScanner, register_builtins};
+use abyssum_scanners::{
+    SUBDOMAIN_BRUTEFORCE_OPTION, SubdomainReconScanner, WORDLIST_OPTION, register_builtins,
+};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -653,4 +656,118 @@ async fn rejects_target_with_a_path() {
     let scanner = SubdomainReconScanner::new();
     let with_path = Target::parse("https://example.com/api/v1").unwrap();
     assert!(scanner.scan(&with_path, &ctx()).await.is_err());
+}
+
+// --- g07: per-scan custom wordlist selection --------------------------------
+
+/// A context with brute-force ON (via global config) carrying arbitrary per-scan
+/// options — used to select a custom wordlist for the run.
+fn ctx_bruteforce_with(opts: ScanOptions) -> ScanContext {
+    let mut config = Config::default();
+    config.scanning.subdomain_bruteforce = true;
+    ScanContext::new(
+        Arc::new(config),
+        RateLimiter::new(Duration::ZERO, Duration::ZERO),
+        Arc::new(SingleUserAgent::default()),
+        CancellationToken::new(),
+    )
+    .with_options(Arc::new(opts))
+}
+
+/// g07 (task 5): the selected custom wordlist drives brute-force, and with no
+/// selection the seeded default applies. The DoH resolver answers NXDOMAIN for
+/// every name (so nothing is confirmed and no unresolvable host is probed); we
+/// assert on *which names were existence-tested*, which reveals the wordlist used.
+#[tokio::test]
+async fn selected_custom_wordlist_is_used_else_the_seeded_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DatabaseManager::connect(dir.path().join("abyssum.db"))
+        .await
+        .unwrap();
+    let auth = AuthManager::new(db.pool().clone(), &AuthConfig::default());
+    let alice = auth.register("alice", "pw").await.unwrap();
+
+    // Alice imports a one-word custom list; the word is not in the seeded set.
+    let wordlists = CustomWordlistStore::from_database(&db);
+    let list = wordlists
+        .import(alice.id, "recon", "zzcustomzz")
+        .await
+        .unwrap()
+        .0;
+
+    // A store-backed scanner (the production brute source), resolver stubbed to a
+    // fresh mock per case so request counts do not bleed across the two runs.
+    let make_scanner = |doh_authority: &str| {
+        SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+            .with_bruteforce_store(db.reference_store())
+            .with_doh_base(Url::parse(&format!("http://{doh_authority}/")).unwrap())
+    };
+
+    // Selected: only the custom word is existence-tested.
+    let doh = start_mock(200, DOH_NXDOMAIN).await;
+    let scanner = make_scanner(&doh.authority);
+    let opts = ScanOptions::new().with(WORDLIST_OPTION, list.id.to_string());
+    scanner
+        .scan(&apex(), &ctx_bruteforce_with(opts))
+        .await
+        .unwrap();
+    let queried = doh.requests.lock().unwrap().clone();
+    assert_eq!(queried.len(), 1, "only the one-word custom list was tested");
+    assert!(
+        queried[0].contains("name=zzcustomzz.127.0.0.1"),
+        "the custom entry was existence-tested: {}",
+        queried[0]
+    );
+
+    // No selection: the seeded default (30+ entries) is used instead.
+    let doh_default = start_mock(200, DOH_NXDOMAIN).await;
+    let scanner = make_scanner(&doh_default.authority);
+    scanner
+        .scan(&apex(), &ctx_bruteforce_with(ScanOptions::new()))
+        .await
+        .unwrap();
+    let queried = doh_default.requests.lock().unwrap().clone();
+    assert!(
+        queried.len() > 1,
+        "the seeded default list has many entries, got {}",
+        queried.len()
+    );
+    assert!(
+        !queried.iter().any(|q| q.contains("zzcustomzz")),
+        "the custom word must not appear when no list is selected"
+    );
+}
+
+/// g07 (task 6): the per-scan entry bound is configurable, and a wordlist larger
+/// than it is truncated — only up to the bound is existence-tested — rather than
+/// probed in full. Uses a fixed 3-candidate brute source and a bound of 1.
+#[tokio::test]
+async fn oversized_wordlist_is_truncated_to_the_configured_bound() {
+    let doh = start_mock(200, DOH_NXDOMAIN).await;
+
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([
+            "a.127.0.0.1".to_string(),
+            "b.127.0.0.1".to_string(),
+            "c.127.0.0.1".to_string(),
+        ])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh.authority)).unwrap());
+
+    let mut config = Config::default();
+    config.scanning.subdomain_bruteforce = true;
+    config.scanning.max_wordlist_entries = 1; // bound below the 3 candidates
+    let ctx = ScanContext::new(
+        Arc::new(config),
+        RateLimiter::new(Duration::ZERO, Duration::ZERO),
+        Arc::new(SingleUserAgent::default()),
+        CancellationToken::new(),
+    );
+
+    scanner.scan(&apex(), &ctx).await.unwrap();
+
+    assert_eq!(
+        doh.requests.lock().unwrap().len(),
+        1,
+        "only the bound-many candidates are tested; the rest are truncated"
+    );
 }

@@ -595,8 +595,9 @@ pub struct Summary {
 }
 
 impl Summary {
-    /// An all-zero summary (every severity present at 0).
-    fn empty() -> Self {
+    /// An all-zero summary (every severity present at 0). Public so a surface can
+    /// show an empty rollup as a fallback without reaching into the store.
+    pub fn empty() -> Self {
         Self {
             session_count: 0,
             finding_count: 0,

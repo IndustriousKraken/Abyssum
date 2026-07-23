@@ -214,6 +214,7 @@ scanning:
   max_concurrency: 4
   user_agent_rotation: per-request   # per-request | per-scan
   subdomain_bruteforce: false        # opt-in active DNS brute-force in subdomain recon (louder; off by default)
+  max_wordlist_entries: 2048         # per-scan cap on wordlist entries used; over-cap lists are truncated (reported)
   support_min_delay: 0.05            # support-infra lookups (public DNS/CT/RDAP used to MAP the target)
   support_max_delay: 0.25            # fast-but-bounded lane; not held to the target floor above
   support_max_concurrency: 8

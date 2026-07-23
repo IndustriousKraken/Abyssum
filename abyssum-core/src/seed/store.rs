@@ -112,6 +112,44 @@ impl ReferenceStore {
             .collect())
     }
 
+    /// Resolve a named wordlist's values **for one scan**: the seeded list by
+    /// default, or the operator-provided custom list `custom` selected for the
+    /// current scan (g07). `custom` is a custom-wordlist id a surface has already
+    /// validated as owned by the scan's operator (owner-scoped via
+    /// [`CustomWordlistStore::get_for_user`](crate::wordlists::CustomWordlistStore::get_for_user)),
+    /// so resolving it here by id introduces no cross-user read. A `None` selection
+    /// — or a seeded `name` that is absent — yields the seeded (or empty) list, so
+    /// probing and the curated data still share one source.
+    pub async fn wordlist_values_for(
+        &self,
+        name: &str,
+        custom: Option<i64>,
+    ) -> Result<Vec<String>> {
+        match custom {
+            Some(id) => self.custom_wordlist_values(id).await,
+            None => self.wordlist_values(name).await,
+        }
+    }
+
+    /// The values of an operator-provided custom wordlist by id, in import order.
+    /// An absent id yields an empty vec — graceful, exactly like a missing seeded
+    /// list — rather than an error. Ownership is enforced upstream (the id only
+    /// reaches a scan after an owner-scoped check), so this reads purely by id.
+    pub async fn custom_wordlist_values(&self, id: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT value FROM user_wordlist_entries WHERE wordlist_id = ? \
+             ORDER BY position ASC, id ASC",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        rows.iter()
+            .map(|row| row.try_get("value").map_err(db_err))
+            .collect()
+    }
+
     /// The full seeded User-Agent pool, each entry marked realistic or not, in
     /// seeded order.
     pub async fn user_agents(&self) -> Result<Vec<PooledUserAgent>> {

@@ -72,6 +72,17 @@ const ID: &str = "subdomain_recon";
 /// `scanning.subdomain_bruteforce` default when the option is unset.
 pub const SUBDOMAIN_BRUTEFORCE_OPTION: &str = "subdomain_bruteforce";
 
+/// The per-scan option key naming the **custom wordlist** the active brute-force
+/// pass draws from for one scan (g07): a custom-wordlist id the surface has already
+/// validated as owned by the scan's operator. When set, the seeded `subdomains`
+/// list is replaced by that operator-provided list for this scan; when unset, the
+/// seeded default applies. The surface owner-scopes the id before recording it, so
+/// the scanner can resolve it by id ([`ReferenceStore::wordlist_values_for`]) with
+/// no cross-user read.
+///
+/// [`ReferenceStore::wordlist_values_for`]: abyssum_core::ReferenceStore::wordlist_values_for
+pub const WORDLIST_OPTION: &str = "wordlist";
+
 /// Names for the external sources this scanner relies on, used when reporting that
 /// one was unavailable so an empty result is never mistaken for "no subdomains".
 const PASSIVE_SOURCE: &str = "certificate transparency (crt.sh)";
@@ -104,10 +115,10 @@ const WORDLIST_SUBDOMAINS: &str = "subdomains";
 /// lookups are paced and User-Agent-rotated like every other request.
 const DOH_BASE: &str = "https://cloudflare-dns.com/dns-query";
 
-/// Upper bound on how many wordlist-generated candidates are existence-tested in
-/// one run. The seeded list is small, but an operator may swap in a large one;
-/// beyond this the wordlist is truncated and the drop is logged, never silent.
-const MAX_BRUTEFORCE_CANDIDATES: usize = 2048;
+// The upper bound on how many wordlist-generated candidates are existence-tested
+// in one run is configurable per install (`scanning.max_wordlist_entries`, g07):
+// the seeded list is small, but an operator may select a large custom one, so the
+// wordlist is truncated to the bound and the drop is logged, never silent.
 
 /// Known unclaimed-service takeover fingerprints: `(service, lowercase body
 /// marker)`. A live subdomain whose response body contains a marker is pointing
@@ -258,13 +269,19 @@ impl SubdomainReconScanner {
     }
 
     /// The normalized, deduplicated brute-force candidate hosts for `apex`: the
-    /// seeded wordlist joined onto the apex (store source) or the fixed candidate
-    /// list as-is (test/caller source). A missing wordlist contributes nothing.
-    async fn brute_candidates(&self, apex: &str) -> Result<Vec<String>> {
+    /// wordlist joined onto the apex (store source) or the fixed candidate list
+    /// as-is (test/caller source). The store source resolves the named `subdomains`
+    /// list *for this scan* — the operator's selected custom wordlist when `custom`
+    /// is set (g07), else the seeded default. A missing wordlist contributes
+    /// nothing. Every wordlist entry still passes through [`generate_candidates`]'s
+    /// DNS-label validation + apex join, so a custom entry can never escape scope.
+    async fn brute_candidates(&self, apex: &str, custom: Option<i64>) -> Result<Vec<String>> {
         match &self.brute {
             BruteSource::Fixed(list) => Ok(normalize_candidates(list.clone(), apex)),
             BruteSource::Store(store) => {
-                let words = store.wordlist_values(WORDLIST_SUBDOMAINS).await?;
+                let words = store
+                    .wordlist_values_for(WORDLIST_SUBDOMAINS, custom)
+                    .await?;
                 Ok(generate_candidates(words, apex))
             }
         }
@@ -283,23 +300,34 @@ impl SubdomainReconScanner {
         ctx: &ScanContext,
         issues: &mut Vec<SourceIssue>,
     ) -> Result<Vec<String>> {
+        // Resolve the wordlist for this scan: the operator's selected custom list
+        // (g07) when one was chosen and validated as theirs, else the seeded
+        // default. An absent / non-numeric option leaves the default in force.
+        let custom = ctx
+            .options()
+            .get(WORDLIST_OPTION)
+            .and_then(|v| v.trim().parse::<i64>().ok());
+
         let already: HashSet<&str> = passive.iter().map(String::as_str).collect();
         let generated: Vec<String> = self
-            .brute_candidates(apex)
+            .brute_candidates(apex, custom)
             .await?
             .into_iter()
             .filter(|host| !already.contains(host.as_str()))
             .collect();
 
-        let (candidates, dropped) = cap_candidates(generated, MAX_BRUTEFORCE_CANDIDATES);
+        // The bound is configurable per install; a selected list larger than it is
+        // truncated to the bound and the drop is reported, never silent (g07).
+        let cap = ctx.config().scanning.max_wordlist_entries;
+        let (candidates, dropped) = cap_candidates(generated, cap);
         if dropped > 0 {
             tracing::warn!(
                 scanner = ID,
                 apex = %apex,
-                cap = MAX_BRUTEFORCE_CANDIDATES,
+                cap,
                 dropped,
-                "brute-force wordlist produced more candidates than the probe cap; \
-                 testing the first {MAX_BRUTEFORCE_CANDIDATES} and dropping {dropped}"
+                "brute-force wordlist produced more candidates than the configured \
+                 bound; testing the first {cap} and dropping {dropped}"
             );
         }
 

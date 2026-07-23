@@ -54,6 +54,13 @@ impl ScanOptions {
         self.values.get(key).map(String::as_str)
     }
 
+    /// Remove option `key` if present. A surface uses this to strip a per-scan
+    /// choice that failed validation (e.g. a selected wordlist id the operator does
+    /// not own), so an unvalidated value never reaches a scanner.
+    pub fn remove(&mut self, key: &str) {
+        self.values.remove(key);
+    }
+
     /// Whether no option is set (defaults apply).
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
