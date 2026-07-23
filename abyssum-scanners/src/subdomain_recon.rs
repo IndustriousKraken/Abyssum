@@ -22,6 +22,13 @@
 //! its first request free, so probing many discovered hosts spreads across them
 //! rather than hammering one — consistent with the stealth posture.
 //!
+//! **Scope invariant.** Every host probed — whether from the passive source or the
+//! brute-force pass — is the target's apex or a subdomain of it. Candidate labels
+//! are constrained to valid DNS labels ([`is_valid_dns_label`]) and each probe URL
+//! is built so the candidate sets only the host ([`probe_url`]), so no candidate
+//! can carry a request to a third party the operator never authorized; out-of-scope
+//! candidates are counted and logged rather than silently dropped.
+//!
 //! ## What is reported
 //!
 //! - A **live** subdomain (any HTTP response received) → an informational finding
@@ -354,9 +361,34 @@ impl BaseScanner for SubdomainReconScanner {
             candidates.extend(confirmed);
         }
 
+        // Enforce the scope invariant on the FINAL candidate set, whatever its
+        // source: build each probe URL so the candidate sets only the host, and
+        // keep only candidates whose actually-requested host is the apex or a
+        // subdomain of it. This is the last line of defense — a future candidate
+        // source that skips label validation still cannot steer a probe outside the
+        // apex. Out-of-scope candidates are counted and logged, never silently
+        // dropped.
+        let mut probes: Vec<(String, Url)> = Vec::new();
+        let mut out_of_scope = 0usize;
+        for host in candidates {
+            match probe_url(scheme, &host, &apex) {
+                Some(url) => probes.push((host, url)),
+                None => out_of_scope += 1,
+            }
+        }
+        if out_of_scope > 0 {
+            tracing::warn!(
+                scanner = ID,
+                apex = %apex,
+                out_of_scope,
+                "discarded {out_of_scope} candidate(s) outside the target's apex \
+                 before probing"
+            );
+        }
+
         // Cap the probe set to a sane bound, logging the truncation rather than
         // silently dropping the tail.
-        let (candidates, dropped) = cap_candidates(candidates, MAX_CANDIDATES);
+        let (probes, dropped) = cap_candidates(probes, MAX_CANDIDATES);
         if dropped > 0 {
             tracing::warn!(
                 scanner = ID,
@@ -370,27 +402,18 @@ impl BaseScanner for SubdomainReconScanner {
             );
         }
 
-        let total = candidates.len();
+        let total = probes.len();
         let mut findings = Vec::new();
 
-        for (index, host) in candidates.iter().enumerate() {
+        for (index, (host, url)) in probes.iter().enumerate() {
             // Stop promptly on cancellation, returning the findings gathered so far.
             if ctx.is_cancelled() {
                 break;
             }
 
-            let url = match Url::parse(&format!("{scheme}://{host}/")) {
-                Ok(url) => url,
-                Err(_) => {
-                    // A candidate that will not form a URL is skipped, never fatal.
-                    ctx.report_progress(progress(index + 1, total, host));
-                    continue;
-                }
-            };
-
             match probe(ctx, RequestSpec::get(url.clone())).await {
                 Ok(response) => {
-                    findings.push(finding_for(target, host, &url, &response));
+                    findings.push(finding_for(target, host, url, &response));
                 }
                 // Cancellation is not a per-host failure: surface it rather than
                 // masking it as a dead candidate.
@@ -542,16 +565,67 @@ where
 /// Truncate `candidates` to at most `cap`, returning the kept prefix and how many
 /// were dropped. Splitting this out of `scan` keeps the cap-and-log decision
 /// unit-testable without issuing any requests.
-fn cap_candidates(mut candidates: Vec<String>, cap: usize) -> (Vec<String>, usize) {
+fn cap_candidates<T>(mut candidates: Vec<T>, cap: usize) -> (Vec<T>, usize) {
     let dropped = candidates.len().saturating_sub(cap);
     candidates.truncate(cap);
     (candidates, dropped)
 }
 
-/// Join each wordlist `word` onto `apex` to form a candidate host, then normalize
-/// and deduplicate the result. Blank words are skipped; a word carrying stray
-/// leading/trailing dots is cleaned before joining, so the seeded list and an
-/// operator's custom list both behave. Pure (no network) so it is unit-testable.
+/// Whether `host` is within the target's apex: the apex itself or a subdomain of
+/// it. Both are already lowercased. The suffix check requires the boundary dot, so
+/// `notexample.com` does not count as under `example.com`.
+fn in_scope(host: &str, apex: &str) -> bool {
+    host == apex
+        || host
+            .strip_suffix(apex)
+            .is_some_and(|label| label.ends_with('.'))
+}
+
+/// Build the liveness-probe URL for `candidate` under `scheme`, enforcing the
+/// scope invariant at the boundary where the request is actually formed.
+///
+/// The candidate is parsed as an authority, then the URL is rebuilt from only its
+/// host and port on a fixed base — so a candidate carrying characters that begin a
+/// path, query, fragment, or userinfo section (`/`, `?`, `#`, `@`, …) cannot
+/// smuggle them into the request, and the host actually contacted is exactly the
+/// parsed host. Returns `None` (the candidate is discarded) unless that host is the
+/// target's apex or a subdomain of it, so no reinterpretation of the authority can
+/// steer a probe out of scope — the check is here at the probe boundary, not only
+/// at generation, so a future candidate source cannot reintroduce the escape.
+fn probe_url(scheme: &str, candidate: &str, apex: &str) -> Option<Url> {
+    let parsed = Url::parse(&format!("{scheme}://{candidate}/")).ok()?;
+    let host = parsed.host_str()?;
+    if !in_scope(host, apex) {
+        return None;
+    }
+    // Rebuild so only the in-scope host and its port survive; anything else the
+    // candidate tried to carry (path, query, fragment, userinfo) is dropped.
+    let mut url = Url::parse(&format!("{scheme}://placeholder.invalid/")).ok()?;
+    url.set_host(Some(host)).ok()?;
+    url.set_port(parsed.port()).ok()?;
+    Some(url)
+}
+
+/// Whether `label` is a valid DNS label: 1–63 characters of ASCII letters, digits,
+/// or hyphens, not starting or ending with a hyphen. Anything else — a `.`, `/`,
+/// `?`, `#`, `@`, `:`, whitespace, or control character — makes it invalid, so a
+/// wordlist entry can never carry a character that reinterprets a URL's authority.
+fn is_valid_dns_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Join each valid wordlist `word` onto `apex` to form a candidate host, then
+/// normalize and deduplicate the result. A word is trimmed and stripped of stray
+/// leading/trailing dots, then accepted only if it is a valid DNS label
+/// ([`is_valid_dns_label`]); anything carrying a character that could reinterpret a
+/// URL's authority (`.`, `/`, `?`, `#`, `@`, `:`, whitespace, …) produces no
+/// candidate. Pure (no network) so it is unit-testable.
 fn generate_candidates<I, S>(words: I, apex: &str) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -559,7 +633,7 @@ where
 {
     let joined = words.into_iter().filter_map(|word| {
         let label = word.as_ref().trim().trim_matches('.').to_ascii_lowercase();
-        (!label.is_empty()).then(|| format!("{label}.{apex}"))
+        is_valid_dns_label(&label).then(|| format!("{label}.{apex}"))
     });
     normalize_candidates(joined, apex)
 }
@@ -945,5 +1019,99 @@ mod tests {
         // Garbage: not confirmed.
         assert!(!doh_indicates_exists(b"not json"));
         assert!(!doh_indicates_exists(b""));
+    }
+
+    // --- Scope invariant: DNS-label validation (task 3) ------------------------
+
+    #[test]
+    fn dns_label_validation_accepts_labels_and_rejects_authority_altering() {
+        let long63 = "a".repeat(63);
+        for good in ["api", "www", "a", "foo-bar", "x1", "1a", long63.as_str()] {
+            assert!(is_valid_dns_label(good), "{good:?} should be a valid label");
+        }
+        let long64 = "a".repeat(64);
+        for bad in [
+            "",
+            "-lead",
+            "trail-",
+            long64.as_str(),
+            // Every character that could terminate/reinterpret a URL authority.
+            "evil.com",
+            "evil.com/",
+            "evil.com#",
+            "evil.com?",
+            "user@evil",
+            "a:b",
+            "a b",
+            "a\tb",
+            "under_score",
+        ] {
+            assert!(!is_valid_dns_label(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn generate_rejects_entries_that_could_alter_the_authority() {
+        // Each crafted entry carries a character that would terminate a URL's
+        // authority; none may produce a candidate host. Only the ordinary label
+        // survives, as a subdomain of the apex.
+        let words = vec![
+            "evil.com#",
+            "evil.com/",
+            "evil.com?",
+            "user@evil.com",
+            "a b",
+            "www",
+        ];
+        let got = generate_candidates(words, "example.com");
+        assert_eq!(got, vec!["www.example.com".to_string()]);
+    }
+
+    // --- Scope invariant: apex membership --------------------------------------
+
+    #[test]
+    fn in_scope_keeps_apex_and_subdomains_only() {
+        assert!(in_scope("example.com", "example.com")); // the apex itself
+        assert!(in_scope("api.example.com", "example.com")); // a subdomain
+        assert!(in_scope("a.b.example.com", "example.com")); // a deep subdomain
+        assert!(!in_scope("evil.com", "example.com")); // unrelated host
+        assert!(!in_scope("notexample.com", "example.com")); // suffix trap (no boundary dot)
+        assert!(!in_scope("example.com.evil.com", "example.com")); // apex as a left label
+    }
+
+    // --- Scope invariant at the probe boundary (tasks 4 + 6) -------------------
+
+    #[test]
+    fn probe_url_never_targets_a_host_outside_the_apex() {
+        let apex = "example.com";
+        // Crafted names that would otherwise redirect the request to a third party
+        // — including ones that survive a naive `.example.com` suffix check — must
+        // build no probe URL at all.
+        for candidate in [
+            "evil.com",              // a passive source returning a bare foreign host
+            "evil.com/.example.com", // path-start escape that ends with .example.com
+            "evil.com#.example.com", // fragment-start escape
+            "evil.com?.example.com", // query-start escape
+            "user@evil.com",         // userinfo escape
+            "a b.example.com",       // whitespace in the authority
+            "notexample.com",        // suffix trap: ends with example.com, not under it
+        ] {
+            assert!(
+                probe_url("https", candidate, apex).is_none(),
+                "{candidate:?} must not build an in-apex probe URL",
+            );
+        }
+
+        // An ordinary subdomain builds a clean GET to exactly that host at the root.
+        let url = probe_url("https", "api.example.com", apex).expect("in-scope host");
+        assert_eq!(url.host_str(), Some("api.example.com"));
+        assert_eq!(url.path(), "/");
+        assert_eq!(url.scheme(), "https");
+
+        // A port on the candidate is preserved (the localhost mock harness relies
+        // on it) and the apex itself is in scope.
+        let with_port = probe_url("http", "127.0.0.1:8080", "127.0.0.1").expect("in-scope host");
+        assert_eq!(with_port.host_str(), Some("127.0.0.1"));
+        assert_eq!(with_port.port(), Some(8080));
     }
 }

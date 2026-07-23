@@ -140,8 +140,14 @@ const DOH_EXISTS: &str = r#"{"Status":0,"Answer":[{"name":"x","type":1,"data":"9
 const DOH_NXDOMAIN: &str = r#"{"Status":3}"#;
 
 /// An apex target probed over plain HTTP, so probes reach the localhost mocks.
+///
+/// The apex is `127.0.0.1` (not a public domain) precisely because the mocks bind
+/// to `127.0.0.1:PORT`: reconnaissance now only ever probes the apex or a subdomain
+/// of it, so a candidate must be within the apex to be probed at all. Each mock's
+/// authority (`127.0.0.1:PORT`) shares the apex host, differing only by port, and a
+/// different port on the apex host is still in scope.
 fn apex() -> Target {
-    Target::parse("http://example.com").unwrap()
+    Target::parse("http://127.0.0.1").unwrap()
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -391,6 +397,57 @@ async fn bruteforce_skips_candidate_that_does_not_resolve() {
     assert!(
         live.requests.lock().unwrap().is_empty(),
         "a candidate that does not resolve is never probed for liveness"
+    );
+}
+
+/// Task 1 (scope invariant, end to end): a candidate outside the target's apex is
+/// discarded and never contacted, even though a live server answers at that
+/// address. Proves the invariant holds where the request is formed, not only at
+/// candidate generation.
+#[tokio::test]
+async fn out_of_apex_candidate_is_never_probed() {
+    // A live server stands in for a third-party host the scanner must never touch.
+    let foreign = start_mock(200, "<html>someone else's site</html>").await;
+
+    // The apex is a real domain; the candidate resolves to the foreign localhost
+    // server, nowhere near the apex, so it must be discarded before any probe.
+    let target = Target::parse("http://example.com").unwrap();
+    let scanner = SubdomainReconScanner::with_candidates([foreign.authority.clone()]);
+    let findings = scanner.scan(&target, &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "an out-of-apex host yields no finding: {findings:#?}"
+    );
+    assert!(
+        foreign.requests.lock().unwrap().is_empty(),
+        "the scanner must issue no request to a host outside the apex",
+    );
+}
+
+/// Tasks 4 + 5 + 6 (authority escape blocked at the probe boundary): a candidate
+/// crafted to reinterpret the URL authority and reach a third party — a name that
+/// *ends with* the apex yet a naive parse resolves to a foreign address — is
+/// discarded before any request. The foreign server is live, so a regression that
+/// probed it would be caught by its (asserted-empty) request log.
+#[tokio::test]
+async fn authority_escaping_candidate_reaches_no_foreign_host() {
+    let foreign = start_mock(200, "<html>a third party</html>").await;
+
+    // `127.0.0.1:PORT/.example.com` parses to host `127.0.0.1` (the foreign
+    // server), even though it ends with the apex — the classic escape.
+    let crafted = format!("{}/.example.com", foreign.authority);
+    let target = Target::parse("http://example.com").unwrap();
+    let scanner = SubdomainReconScanner::with_candidates([crafted]);
+    let findings = scanner.scan(&target, &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "the crafted candidate yields nothing: {findings:#?}"
+    );
+    assert!(
+        foreign.requests.lock().unwrap().is_empty(),
+        "no request may reach a host outside the apex, even via an authority escape",
     );
 }
 
