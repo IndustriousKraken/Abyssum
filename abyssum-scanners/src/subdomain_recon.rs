@@ -388,14 +388,17 @@ impl BaseScanner for SubdomainReconScanner {
         // keep only candidates whose actually-requested host is the apex or a
         // subdomain of it. This is the last line of defense — a future candidate
         // source that skips label validation still cannot steer a probe outside the
-        // apex. Out-of-scope candidates are counted and logged, never silently
-        // dropped.
+        // apex. Discarded candidates are counted and logged — an out-of-apex host
+        // (the security-relevant case) apart from one that simply did not parse —
+        // never silently dropped.
         let mut probes: Vec<(String, Url)> = Vec::new();
         let mut out_of_scope = 0usize;
+        let mut unparseable = 0usize;
         for host in candidates {
             match probe_url(scheme, &host, &apex) {
-                Some(url) => probes.push((host, url)),
-                None => out_of_scope += 1,
+                ProbeOutcome::InScope(url) => probes.push((host, url)),
+                ProbeOutcome::OutOfApex => out_of_scope += 1,
+                ProbeOutcome::Unparseable => unparseable += 1,
             }
         }
         if out_of_scope > 0 {
@@ -404,6 +407,15 @@ impl BaseScanner for SubdomainReconScanner {
                 apex = %apex,
                 out_of_scope,
                 "discarded {out_of_scope} candidate(s) outside the target's apex \
+                 before probing"
+            );
+        }
+        if unparseable > 0 {
+            tracing::warn!(
+                scanner = ID,
+                apex = %apex,
+                unparseable,
+                "discarded {unparseable} candidate(s) that did not parse as a host \
                  before probing"
             );
         }
@@ -609,6 +621,21 @@ fn in_scope(host: &str, apex: &str) -> bool {
             .is_some_and(|label| label.ends_with('.'))
 }
 
+/// The outcome of building a liveness-probe URL for a candidate: an in-scope URL,
+/// or one of the two distinct reasons a candidate is discarded. The reasons are
+/// kept apart so the discard log distinguishes an out-of-apex host — the
+/// security-relevant case, a source steering a probe at a third party — from a
+/// candidate that simply could not be parsed into a host (benign junk).
+#[derive(Debug)]
+enum ProbeOutcome {
+    /// The candidate is the apex or a subdomain of it; probe this URL.
+    InScope(Url),
+    /// The candidate parsed to a host outside the target's apex.
+    OutOfApex,
+    /// The candidate could not be parsed into a host at all.
+    Unparseable,
+}
+
 /// Build the liveness-probe URL for `candidate` under `scheme`, enforcing the
 /// scope invariant at the boundary where the request is actually formed.
 ///
@@ -616,22 +643,31 @@ fn in_scope(host: &str, apex: &str) -> bool {
 /// host and port on a fixed base — so a candidate carrying characters that begin a
 /// path, query, fragment, or userinfo section (`/`, `?`, `#`, `@`, …) cannot
 /// smuggle them into the request, and the host actually contacted is exactly the
-/// parsed host. Returns `None` (the candidate is discarded) unless that host is the
-/// target's apex or a subdomain of it, so no reinterpretation of the authority can
-/// steer a probe out of scope — the check is here at the probe boundary, not only
-/// at generation, so a future candidate source cannot reintroduce the escape.
-fn probe_url(scheme: &str, candidate: &str, apex: &str) -> Option<Url> {
-    let parsed = Url::parse(&format!("{scheme}://{candidate}/")).ok()?;
-    let host = parsed.host_str()?;
+/// parsed host. Yields [`ProbeOutcome::InScope`] only when that host is the target's
+/// apex or a subdomain of it, so no reinterpretation of the authority can steer a
+/// probe out of scope — the check is here at the probe boundary, not only at
+/// generation, so a future candidate source cannot reintroduce the escape.
+/// Otherwise the candidate is discarded as [`ProbeOutcome::OutOfApex`] (a foreign
+/// host) or [`ProbeOutcome::Unparseable`] (no host could be parsed).
+fn probe_url(scheme: &str, candidate: &str, apex: &str) -> ProbeOutcome {
+    let Ok(parsed) = Url::parse(&format!("{scheme}://{candidate}/")) else {
+        return ProbeOutcome::Unparseable;
+    };
+    let Some(host) = parsed.host_str() else {
+        return ProbeOutcome::Unparseable;
+    };
     if !in_scope(host, apex) {
-        return None;
+        return ProbeOutcome::OutOfApex;
     }
     // Rebuild so only the in-scope host and its port survive; anything else the
     // candidate tried to carry (path, query, fragment, userinfo) is dropped.
-    let mut url = Url::parse(&format!("{scheme}://placeholder.invalid/")).ok()?;
-    url.set_host(Some(host)).ok()?;
-    url.set_port(parsed.port()).ok()?;
-    Some(url)
+    let Ok(mut url) = Url::parse(&format!("{scheme}://placeholder.invalid/")) else {
+        return ProbeOutcome::Unparseable;
+    };
+    if url.set_host(Some(host)).is_err() || url.set_port(parsed.port()).is_err() {
+        return ProbeOutcome::Unparseable;
+    }
+    ProbeOutcome::InScope(url)
 }
 
 /// Whether `label` is a valid DNS label: 1–63 characters of ASCII letters, digits,
@@ -1146,20 +1182,40 @@ mod tests {
             "notexample.com",        // suffix trap: ends with example.com, not under it
         ] {
             assert!(
-                probe_url("https", candidate, apex).is_none(),
+                !matches!(
+                    probe_url("https", candidate, apex),
+                    ProbeOutcome::InScope(_)
+                ),
                 "{candidate:?} must not build an in-apex probe URL",
             );
         }
 
+        // The discard reason is classified: a foreign host that parses is
+        // `OutOfApex` (the security-relevant case), while one that cannot be parsed
+        // into a host at all is `Unparseable` — so the log tells them apart.
+        assert!(matches!(
+            probe_url("https", "evil.com", apex),
+            ProbeOutcome::OutOfApex
+        ));
+        assert!(matches!(
+            probe_url("https", "a b.example.com", apex),
+            ProbeOutcome::Unparseable
+        ));
+
         // An ordinary subdomain builds a clean GET to exactly that host at the root.
-        let url = probe_url("https", "api.example.com", apex).expect("in-scope host");
+        let ProbeOutcome::InScope(url) = probe_url("https", "api.example.com", apex) else {
+            panic!("api.example.com is in scope");
+        };
         assert_eq!(url.host_str(), Some("api.example.com"));
         assert_eq!(url.path(), "/");
         assert_eq!(url.scheme(), "https");
 
         // A port on the candidate is preserved (the localhost mock harness relies
         // on it) and the apex itself is in scope.
-        let with_port = probe_url("http", "127.0.0.1:8080", "127.0.0.1").expect("in-scope host");
+        let ProbeOutcome::InScope(with_port) = probe_url("http", "127.0.0.1:8080", "127.0.0.1")
+        else {
+            panic!("127.0.0.1 apex is in scope");
+        };
         assert_eq!(with_port.host_str(), Some("127.0.0.1"));
         assert_eq!(with_port.port(), Some(8080));
     }
