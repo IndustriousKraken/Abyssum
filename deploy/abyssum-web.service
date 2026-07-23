@@ -1,25 +1,25 @@
 # Abyssum web UI — systemd unit (template).
 #
+# abyssum-web is a self-contained binary: it embeds its web assets and defaults
+# its config/database to absolute per-user paths, so it needs no source checkout.
+#
 # Copy to /etc/systemd/system/abyssum-web.service, edit the marked lines, then:
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now abyssum-web
 #
-# Redeploy a new version (the binding/config survives because it lives here,
-# not in your shell):
+# Redeploy a new version (settings live here, not in your shell):
 #   ./install.sh && sudo systemctl restart abyssum-web
 #
 # EDIT before use:
-#   User=/Group=       the account to run as
-#   WorkingDirectory=  a working dir for the service (config no longer lives here;
-#                      see ABYSSUM_CONFIG below)
-#   ExecStart=         path to the installed abyssum-web binary
-#   ABYSSUM_WEB_STATIC path to a copy of abyssum-web/static/ (see note below)
+#   User=/Group=   the account to run as
+#   ExecStart=     path to the installed abyssum-web binary
 #
-# Home-directory install (binary in ~/.local/bin, assets in ~/code/Abyssum)?
-# Set User= to your account, point the paths at your home dir, change
-# ExecStart= to ~/.local/bin/abyssum-web, and change `ProtectHome=true` to
-# `ProtectHome=read-only` (the app only READS its assets/config from home; the
-# writable DB lives in StateDirectory below, so read-only home is enough).
+# Config is optional — built-in defaults apply. To supply a file, point
+# ABYSSUM_CONFIG at an absolute path (commented line below).
+#
+# Binary in ~/.local/bin (a non-root install.sh)? Set User= to your account,
+# ExecStart=/home/<you>/.local/bin/abyssum-web, and change `ProtectHome=true`
+# to `ProtectHome=read-only` so systemd can read the binary from your home.
 
 [Unit]
 Description=Abyssum web UI
@@ -31,7 +31,6 @@ Wants=network-online.target
 Type=simple
 User=abyssum
 Group=abyssum
-WorkingDirectory=/opt/abyssum
 ExecStart=/usr/local/bin/abyssum-web
 
 # --- Runtime config ----------------------------------------------------------
@@ -39,11 +38,8 @@ ExecStart=/usr/local/bin/abyssum-web
 # absent). To use one, point ABYSSUM_CONFIG at an absolute path readable by the
 # service account, e.g.:
 # Environment=ABYSSUM_CONFIG=/etc/abyssum/abyssum.yaml
-# Web assets. Needed only until the embed-web-static-assets issue ships; point
-# it at a copy of abyssum-web/static/. Delete this line once assets are embedded.
-Environment=ABYSSUM_WEB_STATIC=/opt/abyssum/static
 # Absolute DB path (systemd creates /var/lib/abyssum via StateDirectory below),
-# so persistence doesn't depend on the working directory.
+# so persistence never depends on the working directory.
 Environment=ABYSSUM_DATABASE_PATH=/var/lib/abyssum/abyssum.db
 # Bind address. Unset = 127.0.0.1 — correct when behind the Caddy reverse proxy
 # (deploy/Caddyfile.example), which is the recommended setup. Uncomment ONLY for
