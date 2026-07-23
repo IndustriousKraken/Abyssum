@@ -141,6 +141,26 @@ systemd — in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
 Do **not** instead expose the app directly with `ABYSSUM_SERVER_HOST=0.0.0.0` on an
 untrusted network: that serves the login and session cookies in cleartext.
 
+## Run as a service (Linux / systemd)
+
+To keep `abyssum-web` running and start it on boot, install it as a systemd service.
+With the binary already installed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/deploy/install-service.sh | sudo bash
+```
+
+That writes `/etc/systemd/system/abyssum-web.service` (running as your user, database in
+`/var/lib/abyssum`), reloads systemd, and enables it. Append `-s -- --host 0.0.0.0` for
+direct LAN access instead of the localhost-behind-Caddy default. A redeploy is then:
+
+```sh
+./install.sh && sudo systemctl restart abyssum-web
+```
+
+`deploy/abyssum-web.service` is the reference unit to install by hand instead, and the
+full deployment walkthrough (with Caddy) is in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
+
 ## Configuration
 
 Configuration layers in strict precedence: **built-in defaults → YAML file →

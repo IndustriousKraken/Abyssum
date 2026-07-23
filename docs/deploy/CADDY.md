@@ -84,13 +84,18 @@ Clients must be able to reach the address in the Caddyfile:
 
 ## Running abyssum-web as a service
 
-Run the app under systemd so its bind address, static-asset path, and DB location live
-in the unit rather than your shell — a redeploy is then just
-`./install.sh && sudo systemctl restart abyssum-web`, with nothing to remember and no
-settings lost between versions. Use the template at
-[`deploy/abyssum-web.service`](../../deploy/abyssum-web.service); it defaults to
-`127.0.0.1` (behind Caddy), and its header explains the home-directory and direct-LAN
-variants.
+Run the app under systemd so its bind address and DB location live in the unit rather
+than your shell — a redeploy is then just `./install.sh && sudo systemctl restart
+abyssum-web`, with nothing lost between versions. One command installs and enables it:
+
+```sh
+sudo deploy/install-service.sh              # runs as the invoking user, DB in /var/lib/abyssum
+# curl -fsSL <raw>/deploy/install-service.sh | sudo bash   # on a box with no checkout
+```
+
+It defaults to `127.0.0.1` (behind Caddy); add `--host 0.0.0.0` for direct LAN access.
+[`deploy/abyssum-web.service`](../../deploy/abyssum-web.service) is the reference unit if
+you'd rather install it by hand.
 
 ## Keep abyssum-web on localhost
 
