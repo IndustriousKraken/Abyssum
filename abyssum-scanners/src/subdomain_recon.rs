@@ -65,6 +65,13 @@ use crate::source_availability::{self, SourceIssue};
 /// must never change.
 const ID: &str = "subdomain_recon";
 
+/// The per-scan option key that toggles active subdomain brute-force for one scan
+/// (g06). A surface sets it on the scan's [`ScanOptions`](abyssum_core::ScanOptions)
+/// — the web scan-form checkbox, the CLI `--bruteforce` flag — and the scanner reads
+/// it here to decide whether the brute-force pass runs, falling back to the global
+/// `scanning.subdomain_bruteforce` default when the option is unset.
+pub const SUBDOMAIN_BRUTEFORCE_OPTION: &str = "subdomain_bruteforce";
+
 /// Names for the external sources this scanner relies on, used when reporting that
 /// one was unavailable so an empty result is never mistaken for "no subdomains".
 const PASSIVE_SOURCE: &str = "certificate transparency (crt.sh)";
@@ -377,10 +384,15 @@ impl BaseScanner for SubdomainReconScanner {
         let mut candidates = normalize_candidates(raw, &apex);
 
         // Active brute-force is opt-in and OFF by default: only when the operator
-        // has enabled it does reconnaissance leave the passive path. Confirmed-
-        // existing brute-force candidates join the same probe set, so they flow
-        // into the identical liveness + takeover evaluation as passive ones.
-        if ctx.config().scanning.subdomain_bruteforce {
+        // has enabled it does reconnaissance leave the passive path. The per-scan
+        // option (g06) decides it for this scan, falling back to the global
+        // `scanning.subdomain_bruteforce` default when unset. Confirmed-existing
+        // brute-force candidates join the same probe set, so they flow into the
+        // identical liveness + takeover evaluation as passive ones.
+        if bruteforce_enabled(
+            ctx.options().get(SUBDOMAIN_BRUTEFORCE_OPTION),
+            ctx.config().scanning.subdomain_bruteforce,
+        ) {
             let confirmed = self
                 .bruteforce(&apex, &candidates, ctx, &mut source_issues)
                 .await?;
@@ -604,6 +616,19 @@ where
         }
     }
     out
+}
+
+/// Whether the active brute-force pass runs for this scan. The per-scan
+/// [`SUBDOMAIN_BRUTEFORCE_OPTION`] wins when it carries a recognized truthy/falsy
+/// value; otherwise the global `scanning.subdomain_bruteforce` `config_default`
+/// applies. A blank or unrecognized value falls back to the default rather than
+/// silently enabling brute-force — conservative-by-default, aggression opt-in.
+fn bruteforce_enabled(option: Option<&str>, config_default: bool) -> bool {
+    match option.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "on" | "yes") => true,
+        Some(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
+        _ => config_default,
+    }
 }
 
 /// Truncate `candidates` to at most `cap`, returning the kept prefix and how many
@@ -1092,6 +1117,30 @@ mod tests {
                 "dev.example.com".to_string(),  // stray dots stripped before join
             ]
         );
+    }
+
+    // --- Per-scan brute-force toggle (g06) -------------------------------------
+
+    #[test]
+    fn bruteforce_toggle_reads_per_scan_option_then_falls_back_to_config() {
+        // Unset → the global default applies, either way.
+        assert!(!bruteforce_enabled(None, false));
+        assert!(bruteforce_enabled(None, true));
+        // Blank or unrecognized → the global default, never a silent enable.
+        assert!(!bruteforce_enabled(Some("  "), false));
+        assert!(!bruteforce_enabled(Some("maybe"), false));
+        assert!(bruteforce_enabled(Some("maybe"), true));
+        // A truthy per-scan option enables even when the global default is off.
+        for on in ["1", "true", "TRUE", " on ", "yes"] {
+            assert!(bruteforce_enabled(Some(on), false), "{on:?} should enable");
+        }
+        // A falsy per-scan option disables even when the global default is on.
+        for off in ["0", "false", "off", "no"] {
+            assert!(
+                !bruteforce_enabled(Some(off), true),
+                "{off:?} should disable"
+            );
+        }
     }
 
     // --- DoH existence parsing (task 3) ----------------------------------------

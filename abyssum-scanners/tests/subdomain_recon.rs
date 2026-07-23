@@ -17,10 +17,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use abyssum_core::{
-    BaseScanner, Config, DatabaseManager, RateLimiter, ScanContext, ScannerRegistry, Severity,
-    SingleUserAgent, Status, Target,
+    BaseScanner, Config, DatabaseManager, RateLimiter, ScanContext, ScanOptions, ScannerRegistry,
+    Severity, SingleUserAgent, Status, Target,
 };
-use abyssum_scanners::{SubdomainReconScanner, register_builtins};
+use abyssum_scanners::{SUBDOMAIN_BRUTEFORCE_OPTION, SubdomainReconScanner, register_builtins};
 
 // --- Mock HTTP server -------------------------------------------------------
 
@@ -132,6 +132,15 @@ fn ctx_with(config: Config) -> ScanContext {
         Arc::new(SingleUserAgent::default()),
         CancellationToken::new(),
     )
+}
+
+/// A context whose global config leaves brute-force OFF, carrying the per-scan
+/// brute-force option (g06) set to `value` — so the scan's choice comes from the
+/// option, not global config.
+fn ctx_with_bruteforce_option(value: &str) -> ScanContext {
+    ctx().with_options(Arc::new(
+        ScanOptions::new().with(SUBDOMAIN_BRUTEFORCE_OPTION, value),
+    ))
 }
 
 /// A DoH JSON body that resolves (NOERROR + an A record) — the name exists.
@@ -369,6 +378,88 @@ async fn bruteforce_enabled_discovers_and_evaluates_existing_candidate() {
     assert!(
         !live.requests.lock().unwrap().is_empty(),
         "the confirmed host was probed"
+    );
+}
+
+/// g06 (task 5, enabled per scan): the per-scan option turns brute-force on for one
+/// scan even though the global config default is off — reconnaissance leaves the
+/// passive path only because this scan opted in, and the confirmed candidate is
+/// evaluated exactly like a passive one.
+#[tokio::test]
+async fn per_scan_option_enables_bruteforce_over_global_default() {
+    let doh = start_mock(200, DOH_EXISTS).await;
+    let live = start_mock(200, "<html><body>real service</body></html>").await;
+
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh.authority)).unwrap());
+
+    // Global default is off (ctx_with_bruteforce_option uses a default config); the
+    // scan opts in through the per-scan option alone.
+    let findings = scanner
+        .scan(&apex(), &ctx_with_bruteforce_option("true"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        doh.requests.lock().unwrap().len(),
+        1,
+        "the candidate was existence-tested because the scan opted in"
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "the confirmed candidate yields a finding: {findings:#?}"
+    );
+    assert_eq!(
+        findings[0].evidence.as_ref().unwrap()["host"],
+        live.authority
+    );
+}
+
+/// g06 (task 5, per-scan + no leak): with the per-scan option off the scan stays
+/// passive, and the choice does not leak from a sibling scan — two scanners run
+/// independently over a brute candidate each, and only the opted-in one probes its
+/// resolver.
+#[tokio::test]
+async fn per_scan_option_choice_does_not_leak_between_scans() {
+    let doh_on = start_mock(200, DOH_EXISTS).await;
+    let live_on = start_mock(200, "<html>up</html>").await;
+    let doh_off = start_mock(200, DOH_EXISTS).await;
+    let live_off = start_mock(200, "<html>up</html>").await;
+
+    let scanner_on = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live_on.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh_on.authority)).unwrap());
+    let scanner_off = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates([live_off.authority.clone()])
+        .with_doh_base(Url::parse(&format!("http://{}/", doh_off.authority)).unwrap());
+
+    // The opted-in scan and the opted-out scan run independently, each with its own
+    // per-scan option; neither sees the other's choice.
+    let on = scanner_on
+        .scan(&apex(), &ctx_with_bruteforce_option("true"))
+        .await
+        .unwrap();
+    let off = scanner_off
+        .scan(&apex(), &ctx_with_bruteforce_option("false"))
+        .await
+        .unwrap();
+
+    assert_eq!(on.len(), 1, "the opted-in scan discovered its candidate");
+    assert_eq!(
+        doh_on.requests.lock().unwrap().len(),
+        1,
+        "the opted-in scan existence-tested its candidate"
+    );
+    assert!(off.is_empty(), "the opted-out scan stays passive: {off:#?}");
+    assert!(
+        doh_off.requests.lock().unwrap().is_empty(),
+        "the opted-out scan never queries the resolver"
+    );
+    assert!(
+        live_off.requests.lock().unwrap().is_empty(),
+        "the opted-out scan never probes a wordlist candidate"
     );
 }
 

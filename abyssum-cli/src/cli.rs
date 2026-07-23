@@ -74,6 +74,13 @@ pub struct Cli {
     #[arg(long, value_name = "TOKEN")]
     pub bearer: Option<String>,
 
+    /// Enable active subdomain brute-force for this run (the `subdomain_recon`
+    /// scanner joins the seeded wordlist onto the apex and existence-tests each
+    /// candidate). Off by default — reconnaissance stays passive unless you opt in;
+    /// overrides the configured `scanning.subdomain_bruteforce` default for this run.
+    #[arg(long = "bruteforce")]
+    pub bruteforce: bool,
+
     /// Minimum inter-request delay, in seconds. Overrides the configured value for
     /// this run, but never paces below the configured floor (see the project's
     /// stealth philosophy).
@@ -419,6 +426,26 @@ mod tests {
             Cli::try_parse_from(["abyssum", "--targets", "a.test", "--scanners", "cors"]).unwrap();
         assert!(bare.cookie.is_none());
         assert!(bare.bearer.is_none());
+    }
+
+    /// `--bruteforce` is an opt-in flag defaulting to off (reconnaissance stays
+    /// passive unless it is passed).
+    #[test]
+    fn parses_bruteforce_flag() {
+        let bare =
+            Cli::try_parse_from(["abyssum", "--targets", "a.test", "--scanners", "cors"]).unwrap();
+        assert!(!bare.bruteforce, "brute-force is off unless opted in");
+
+        let on = Cli::try_parse_from([
+            "abyssum",
+            "--targets",
+            "a.test",
+            "--scanners",
+            "subdomain_recon",
+            "--bruteforce",
+        ])
+        .unwrap();
+        assert!(on.bruteforce);
     }
 
     /// Pacing and log-level overrides parse into their option fields.

@@ -170,6 +170,10 @@ pub fn scan_page(
              </select></label> \
            <a href=\"/timing-profiles\" class=\"muted\">Manage profiles</a>\
          </fieldset>\
+         <fieldset><legend>Subdomain reconnaissance</legend>\
+           <label><input type=\"checkbox\" name=\"opt.subdomain_bruteforce\" value=\"true\"> \
+             Active subdomain brute-force (opt-in; off by default, stays passive otherwise)</label>\
+         </fieldset>\
          <button type=\"submit\">Start scan</button></form>",
         csrf = csrf_field(csrf),
     );
