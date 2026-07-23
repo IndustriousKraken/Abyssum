@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use abyssum_core::{
     CancellationToken, Config, Credential, DatabaseManager, Identity, Orchestrator,
-    ProgressCallback, ProgressKind, ProgressUpdate, ReferenceStore, ScanSession, ScannerRegistry,
-    SessionStatus, Target, logging,
+    ProgressCallback, ProgressKind, ProgressUpdate, ReferenceStore, ScanOptions, ScanSession,
+    ScannerRegistry, SessionStatus, Target, logging,
 };
 use abyssum_scanners::register_builtins;
 use uuid::Uuid;
@@ -138,8 +138,13 @@ pub async fn execute(cli: Cli) -> Result<RunOutcome, CliError> {
     if let Some(credential) = credential {
         orchestrator = orchestrator.with_credential(credential);
     }
+    // Per-scan options ride on the session through the shared options path. The CLI
+    // supplies none today, so this is an empty set and the scan applies defaults;
+    // the feature changes that build on g03 add the flags that populate it (e.g. a
+    // brute-force toggle), which then flow through here unchanged.
+    let options = ScanOptions::default();
     let handle = orchestrator
-        .create_session(targets, scanner_ids)
+        .create_session_with_options(targets, scanner_ids, options)
         .map_err(|e| CliError::BadInput(e.to_string()))?;
     let session_id = handle.lock().expect("session handle not poisoned").id;
 

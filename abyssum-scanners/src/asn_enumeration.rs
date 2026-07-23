@@ -46,9 +46,16 @@ use abyssum_core::{
     ScannerRegistry, Severity, Status, Target,
 };
 
+use crate::source_availability::{self, SourceIssue};
+
 /// The stable scanner id. The registry keys on this and a scan selects by it; it
 /// must never change.
 const ID: &str = "asn_enumeration";
+
+/// Names for the external sources this scanner relies on, used when reporting that
+/// one was unavailable so an empty result is never mistaken for "nothing to enumerate".
+const REGDATA_SOURCE: &str = "registration data (RIPEstat)";
+const DOH_SOURCE: &str = "DNS-over-HTTPS resolver";
 
 /// Default registration-data source: RIPEstat, RIPE NCC's maintained, official data
 /// API aggregating registration (RDAP/WHOIS) and routing data as HTTP/JSON, so it
@@ -136,15 +143,21 @@ impl AsnEnumerationScanner {
 
     /// The IP to look up for `host`: the host itself when it is already an IP
     /// literal, a fixed override, or the first A record resolved over the paced DoH
-    /// path. `None` when a domain does not resolve.
-    async fn resolve_ip(&self, host: &str, ctx: &ScanContext) -> Result<Option<String>> {
+    /// path. `None` when a domain does not resolve. Records an entry in `issues` if
+    /// the resolver could not be consulted.
+    async fn resolve_ip(
+        &self,
+        host: &str,
+        ctx: &ScanContext,
+        issues: &mut Vec<SourceIssue>,
+    ) -> Result<Option<String>> {
         // A target already given as an IP is looked up directly — no DNS needed.
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(Some(ip.to_string()));
         }
         match &self.resolver {
             Resolver::Fixed(ip) => Ok(Some(ip.clone())),
-            Resolver::Doh { doh_base } => doh_resolve_ipv4(doh_base, host, ctx).await,
+            Resolver::Doh { doh_base } => doh_resolve_ipv4(doh_base, host, ctx, issues).await,
         }
     }
 }
@@ -180,31 +193,38 @@ impl BaseScanner for AsnEnumerationScanner {
         // `validate_target` guarantees a host.
         let host = target.host().unwrap_or_default().to_ascii_lowercase();
 
+        // External sources that could not be consulted this run — reported as
+        // informational findings so an empty result is never mistaken for "this
+        // organization has no footprint" when a source was simply unavailable.
+        let mut source_issues: Vec<SourceIssue> = Vec::new();
+
         // Step 1: resolve the target to an IP (skipped for an IP-literal target).
-        let Some(ip) = self.resolve_ip(&host, ctx).await? else {
+        let Some(ip) = self.resolve_ip(&host, ctx, &mut source_issues).await? else {
             tracing::warn!(
                 scanner = ID,
                 host = %host,
                 "target did not resolve to an IP; nothing to enumerate"
             );
-            return Ok(Vec::new());
+            return Ok(source_availability::to_findings(source_issues, ID, target));
         };
 
         // Step 2: look up the owning ASN + organization for the IP.
-        let Some(info) = self.lookup_asn(&ip, ctx).await? else {
+        let Some(info) = self.lookup_asn(&ip, ctx, &mut source_issues).await? else {
             tracing::warn!(
                 scanner = ID,
                 host = %host,
                 ip = %ip,
                 "registration-data source returned no ASN for the IP; nothing to enumerate"
             );
-            return Ok(Vec::new());
+            return Ok(source_availability::to_findings(source_issues, ID, target));
         };
 
         ctx.report_progress(progress(1, 2, &format!("AS{}", info.asn)));
 
         // Step 3: enumerate the ASN's announced netblocks.
-        let announced = self.lookup_netblocks(info.asn, ctx).await?;
+        let announced = self
+            .lookup_netblocks(info.asn, ctx, &mut source_issues)
+            .await?;
         let (netblocks, dropped) = cap_netblocks(announced, MAX_NETBLOCKS);
         if dropped > 0 {
             tracing::warn!(
@@ -224,6 +244,10 @@ impl BaseScanner for AsnEnumerationScanner {
         for netblock in &netblocks {
             findings.push(netblock_finding(target, &host, netblock, &info));
         }
+        // Report any source that could not be consulted (e.g. the ASN prefix
+        // enumeration failed after the IP lookup succeeded), so a partial footprint
+        // is distinguishable from a complete one.
+        findings.extend(source_availability::to_findings(source_issues, ID, target));
 
         ctx.report_progress(progress(2, 2, &format!("AS{}", info.asn)));
         Ok(findings)
@@ -232,10 +256,17 @@ impl BaseScanner for AsnEnumerationScanner {
 
 impl AsnEnumerationScanner {
     /// Query the registration-data source for the ASN + owning organization of
-    /// `ip`, through the paced request path. A non-2xx, transport failure, or a
-    /// body with no ASN yields `None` (logged) rather than failing the scan —
-    /// enumeration is best-effort; cancellation propagates.
-    async fn lookup_asn(&self, ip: &str, ctx: &ScanContext) -> Result<Option<IpAsnInfo>> {
+    /// `ip`, through the paced request path. A non-2xx or transport failure yields
+    /// `None` (logged, and recorded in `issues` so an unavailable source is
+    /// reported) rather than failing the scan — enumeration is best-effort;
+    /// cancellation propagates. A healthy 2xx that simply carries no ASN (an
+    /// unannounced IP) records no issue.
+    async fn lookup_asn(
+        &self,
+        ip: &str,
+        ctx: &ScanContext,
+        issues: &mut Vec<SourceIssue>,
+    ) -> Result<Option<IpAsnInfo>> {
         let Some(url) = source_url(&self.source_base, "prefix-overview/data.json", ip) else {
             return Ok(None);
         };
@@ -250,6 +281,7 @@ impl AsnEnumerationScanner {
                     status = response.status,
                     "registration-data source returned a non-success status for the IP lookup"
                 );
+                issues.push(SourceIssue::non_success(REGDATA_SOURCE, response.status));
                 Ok(None)
             }
             Err(Error::Cancelled) => Err(Error::Cancelled),
@@ -260,15 +292,22 @@ impl AsnEnumerationScanner {
                     error = %err,
                     "IP-to-ASN lookup failed; nothing to enumerate"
                 );
+                issues.push(SourceIssue::errored(REGDATA_SOURCE));
                 Ok(None)
             }
         }
     }
 
     /// Query the registration-data source for the netblocks `asn` announces,
-    /// through the paced request path. A non-2xx, transport failure, or an
-    /// unparseable body yields no netblocks (logged); cancellation propagates.
-    async fn lookup_netblocks(&self, asn: u64, ctx: &ScanContext) -> Result<Vec<String>> {
+    /// through the paced request path. A non-2xx or transport failure yields no
+    /// netblocks (logged, and recorded in `issues`); cancellation propagates. A
+    /// healthy 2xx that lists no prefixes records no issue.
+    async fn lookup_netblocks(
+        &self,
+        asn: u64,
+        ctx: &ScanContext,
+        issues: &mut Vec<SourceIssue>,
+    ) -> Result<Vec<String>> {
         let Some(url) = source_url(
             &self.source_base,
             "announced-prefixes/data.json",
@@ -287,6 +326,7 @@ impl AsnEnumerationScanner {
                     status = response.status,
                     "registration-data source returned a non-success status for the ASN prefixes"
                 );
+                issues.push(SourceIssue::non_success(REGDATA_SOURCE, response.status));
                 Ok(Vec::new())
             }
             Err(Error::Cancelled) => Err(Error::Cancelled),
@@ -297,6 +337,7 @@ impl AsnEnumerationScanner {
                     error = %err,
                     "ASN prefix enumeration failed; reporting the ASN with no netblocks"
                 );
+                issues.push(SourceIssue::errored(REGDATA_SOURCE));
                 Ok(Vec::new())
             }
         }
@@ -409,9 +450,16 @@ fn parse_asn_prefixes(body: &[u8]) -> Vec<String> {
 
 /// Resolve `host` to its first A record over the paced DoH path. Queries the DoH
 /// JSON API for an `A` record and returns the first address in the answer.
-/// Best-effort: a non-success resolver status, a transport failure, or NXDOMAIN
-/// yields `None`; cancellation propagates.
-async fn doh_resolve_ipv4(doh_base: &Url, host: &str, ctx: &ScanContext) -> Result<Option<String>> {
+/// Best-effort: a non-success resolver status or a transport failure yields `None`
+/// and records an entry in `issues` (so an unavailable resolver is reported); a
+/// healthy 2xx NXDOMAIN also yields `None` but records no issue; cancellation
+/// propagates.
+async fn doh_resolve_ipv4(
+    doh_base: &Url,
+    host: &str,
+    ctx: &ScanContext,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<Option<String>> {
     let mut url = doh_base.clone();
     url.query_pairs_mut()
         .clear()
@@ -424,7 +472,10 @@ async fn doh_resolve_ipv4(doh_base: &Url, host: &str, ctx: &ScanContext) -> Resu
         Ok(response) if (200..300).contains(&response.status) => {
             Ok(doh_first_a_record(&response.body))
         }
-        Ok(_) => Ok(None),
+        Ok(response) => {
+            issues.push(SourceIssue::non_success(DOH_SOURCE, response.status));
+            Ok(None)
+        }
         Err(Error::Cancelled) => Err(Error::Cancelled),
         Err(err) => {
             tracing::warn!(
@@ -433,6 +484,7 @@ async fn doh_resolve_ipv4(doh_base: &Url, host: &str, ctx: &ScanContext) -> Resu
                 error = %err,
                 "DoH resolution failed; nothing to enumerate"
             );
+            issues.push(SourceIssue::errored(DOH_SOURCE));
             Ok(None)
         }
     }

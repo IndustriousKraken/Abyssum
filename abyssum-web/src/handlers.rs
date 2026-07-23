@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use abyssum_core::{
     CustomRequestSpec, Finding, FindingFilter, FindingId, ProgressCallback, ProgressUpdate,
-    ScanSession, SessionHandle, Severity, Status, TagApply, Target, User, execute_custom_request,
-    normalize_url, visible_session, visible_sessions,
+    ScanOptions, ScanSession, SessionHandle, Severity, Status, TagApply, Target, User,
+    execute_custom_request, normalize_url, visible_session, visible_sessions,
 };
 use axum::Extension;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
@@ -339,9 +339,19 @@ pub async fn start_scan(
         }
     }
 
-    // create_session validates every scanner id up front (unknown → error, no
-    // session created), so an unknown id never issues traffic.
-    let handle = match state.orchestrator.create_session(targets, scanner_ids) {
+    // Per-scan option inputs are namespaced under `opt.<key>` on the scan form;
+    // collect any present so the scan carries them. No option inputs exist on the
+    // form yet — the feature changes that build on g03 (brute-force toggle, timing
+    // profile, wordlist) add them and read their own key back through the scan
+    // context — so today this is empty and the scan applies defaults.
+    let options = scan_options_from_form(&form);
+
+    // create_session_with_options validates every scanner id up front (unknown →
+    // error, no session created), so an unknown id never issues traffic.
+    let handle = match state
+        .orchestrator
+        .create_session_with_options(targets, scanner_ids, options)
+    {
         Ok(handle) => handle,
         Err(err) => return fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
     };
@@ -989,6 +999,21 @@ fn parse_form(body: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Collect the scan form's per-scan options: every field named `opt.<key>` becomes
+/// option `<key>`. The scan form namespaces its option inputs under this prefix, so
+/// a feature that adds one (a brute-force toggle, a timing profile, a wordlist
+/// choice) flows through here with no change to this handler. A form with no such
+/// field yields an empty [`ScanOptions`] and the scan applies defaults.
+fn scan_options_from_form(form: &[(String, String)]) -> ScanOptions {
+    let mut options = ScanOptions::new();
+    for (key, value) in form {
+        if let Some(name) = key.strip_prefix("opt.") {
+            options.set(name, value.clone());
+        }
+    }
+    options
+}
+
 /// Decode one `application/x-www-form-urlencoded` component (`+` → space, `%XX`).
 fn percent_decode(input: &str) -> String {
     let spaced = input.replace('+', " ");
@@ -1068,6 +1093,21 @@ mod tests {
             .collect();
         assert_eq!(scanners, vec!["cors", "bac"]);
         assert_eq!(field(&form, "targets"), Some("https://a.test b"));
+    }
+
+    #[test]
+    fn scan_options_from_form_collects_only_opt_prefixed_fields() {
+        // No `opt.` field → empty options (the scan applies defaults).
+        let bare = parse_form("scanners=cors&targets=https%3A%2F%2Fa.test");
+        assert!(scan_options_from_form(&bare).is_empty());
+
+        // `opt.<key>` fields are carried, stripped of the prefix; other fields are
+        // ignored. This is the seam the feature changes hook their inputs into.
+        let form = parse_form("scanners=cors&opt.timing_profile=organic&opt.brute=on");
+        let options = scan_options_from_form(&form);
+        assert_eq!(options.get("timing_profile"), Some("organic"));
+        assert_eq!(options.get("brute"), Some("on"));
+        assert_eq!(options.get("scanners"), None);
     }
 
     #[test]

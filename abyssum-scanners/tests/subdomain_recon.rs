@@ -140,8 +140,14 @@ const DOH_EXISTS: &str = r#"{"Status":0,"Answer":[{"name":"x","type":1,"data":"9
 const DOH_NXDOMAIN: &str = r#"{"Status":3}"#;
 
 /// An apex target probed over plain HTTP, so probes reach the localhost mocks.
+///
+/// The apex is `127.0.0.1` (not a public domain) precisely because the mocks bind
+/// to `127.0.0.1:PORT`: reconnaissance now only ever probes the apex or a subdomain
+/// of it, so a candidate must be within the apex to be probed at all. Each mock's
+/// authority (`127.0.0.1:PORT`) shares the apex host, differing only by port, and a
+/// different port on the apex host is still in scope.
 fn apex() -> Target {
-    Target::parse("http://example.com").unwrap()
+    Target::parse("http://127.0.0.1").unwrap()
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -392,6 +398,161 @@ async fn bruteforce_skips_candidate_that_does_not_resolve() {
         live.requests.lock().unwrap().is_empty(),
         "a candidate that does not resolve is never probed for liveness"
     );
+}
+
+/// Task 1 (scope invariant, end to end): a candidate outside the target's apex is
+/// discarded and never contacted, even though a live server answers at that
+/// address. Proves the invariant holds where the request is formed, not only at
+/// candidate generation.
+#[tokio::test]
+async fn out_of_apex_candidate_is_never_probed() {
+    // A live server stands in for a third-party host the scanner must never touch.
+    let foreign = start_mock(200, "<html>someone else's site</html>").await;
+
+    // The apex is a real domain; the candidate resolves to the foreign localhost
+    // server, nowhere near the apex, so it must be discarded before any probe.
+    let target = Target::parse("http://example.com").unwrap();
+    let scanner = SubdomainReconScanner::with_candidates([foreign.authority.clone()]);
+    let findings = scanner.scan(&target, &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "an out-of-apex host yields no finding: {findings:#?}"
+    );
+    assert!(
+        foreign.requests.lock().unwrap().is_empty(),
+        "the scanner must issue no request to a host outside the apex",
+    );
+}
+
+/// Tasks 4 + 5 + 6 (authority escape blocked at the probe boundary): a candidate
+/// crafted to reinterpret the URL authority and reach a third party — a name that
+/// *ends with* the apex yet a naive parse resolves to a foreign address — is
+/// discarded before any request. The foreign server is live, so a regression that
+/// probed it would be caught by its (asserted-empty) request log.
+#[tokio::test]
+async fn authority_escaping_candidate_reaches_no_foreign_host() {
+    let foreign = start_mock(200, "<html>a third party</html>").await;
+
+    // `127.0.0.1:PORT/.example.com` parses to host `127.0.0.1` (the foreign
+    // server), even though it ends with the apex — the classic escape.
+    let crafted = format!("{}/.example.com", foreign.authority);
+    let target = Target::parse("http://example.com").unwrap();
+    let scanner = SubdomainReconScanner::with_candidates([crafted]);
+    let findings = scanner.scan(&target, &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "the crafted candidate yields nothing: {findings:#?}"
+    );
+    assert!(
+        foreign.requests.lock().unwrap().is_empty(),
+        "no request may reach a host outside the apex, even via an authority escape",
+    );
+}
+
+/// Whether `findings` contains a source-availability note naming an unavailable
+/// discovery source (evidence carries `results_may_be_incomplete`).
+fn source_unavailable_finding(
+    findings: &[abyssum_core::Finding],
+) -> Option<&abyssum_core::Finding> {
+    findings.iter().find(|f| {
+        f.evidence
+            .as_ref()
+            .and_then(|e| e["results_may_be_incomplete"].as_bool())
+            == Some(true)
+    })
+}
+
+/// Task 6 (failing source): a passive source that cannot be reached yields an
+/// informational finding naming the source and stating results may be incomplete —
+/// so an empty result is never mistaken for "this apex has no subdomains".
+#[tokio::test]
+async fn failing_passive_source_reports_unavailable() {
+    // A bound-then-dropped authority: the source query is refused (transport error).
+    let dead = dead_authority().await;
+    let scanner =
+        SubdomainReconScanner::with_source_base(Url::parse(&format!("http://{dead}/")).unwrap());
+
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    let note = source_unavailable_finding(&findings).expect("a source-availability finding");
+    assert_eq!(note.status, Status::Info);
+    assert_eq!(note.severity, Severity::Info);
+    assert!(
+        note.title.contains("crt.sh"),
+        "the finding names the source: {}",
+        note.title
+    );
+    // A failed (unreachable) source carries no HTTP status.
+    assert!(note.evidence.as_ref().unwrap()["status"].is_null());
+}
+
+/// Task 6 (non-2xx source): a passive source that answers with a non-success status
+/// (the observed crt.sh 502) yields an informational finding naming the source and
+/// its status.
+#[tokio::test]
+async fn non_success_passive_source_reports_status() {
+    let source = start_mock(502, "Bad Gateway").await;
+    let scanner = SubdomainReconScanner::with_source_base(
+        Url::parse(&format!("http://{}/", source.authority)).unwrap(),
+    );
+
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    let note = source_unavailable_finding(&findings).expect("a source-availability finding");
+    assert_eq!(note.status, Status::Info);
+    assert!(note.title.contains("crt.sh"));
+    assert_eq!(note.evidence.as_ref().unwrap()["status"], 502);
+}
+
+/// Task 6 (healthy but empty): a source that responds normally yet lists no names
+/// yields no source-availability finding — the empty result reflects the source's
+/// answer, not a failure to consult it.
+#[tokio::test]
+async fn healthy_empty_passive_source_reports_nothing() {
+    // A well-formed crt.sh response with zero entries.
+    let source = start_mock(200, "[]").await;
+    let scanner = SubdomainReconScanner::with_source_base(
+        Url::parse(&format!("http://{}/", source.authority)).unwrap(),
+    );
+
+    let findings = scanner.scan(&apex(), &ctx()).await.unwrap();
+
+    assert!(
+        findings.is_empty(),
+        "a healthy empty source yields no findings at all: {findings:#?}"
+    );
+}
+
+/// Task 5 (brute-force DoH): with brute-force enabled, a resolver that is
+/// unavailable yields a single source-availability finding (not one per candidate),
+/// so operators know the brute-force pass could not confirm names.
+#[tokio::test]
+async fn failing_bruteforce_resolver_reports_unavailable_once() {
+    // The resolver authority is dead: every existence test is refused.
+    let dead_doh = dead_authority().await;
+    let scanner = SubdomainReconScanner::with_candidates(std::iter::empty::<String>())
+        .with_bruteforce_candidates(["a.127.0.0.1", "b.127.0.0.1", "c.127.0.0.1"])
+        .with_doh_base(Url::parse(&format!("http://{dead_doh}/")).unwrap());
+
+    let findings = scanner.scan(&apex(), &ctx_bruteforce()).await.unwrap();
+
+    let notes: Vec<_> = findings
+        .iter()
+        .filter(|f| {
+            f.evidence
+                .as_ref()
+                .and_then(|e| e["results_may_be_incomplete"].as_bool())
+                == Some(true)
+        })
+        .collect();
+    assert_eq!(
+        notes.len(),
+        1,
+        "a repeatedly-failing resolver is reported once, not per candidate: {findings:#?}"
+    );
+    assert!(notes[0].title.contains("DNS-over-HTTPS"));
 }
 
 /// A hostless / pathful target is rejected before any traffic: recon needs a bare

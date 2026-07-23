@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::rate_limiter::{Pace, RateLimiter};
 
+use super::options::ScanOptions;
 use super::progress::{ProgressCallback, ProgressUpdate};
 
 /// The default User-Agent for the single-identity source. `add-seed-data` (a04)
@@ -184,6 +185,7 @@ pub struct ScanContext {
     progress: Option<ProgressCallback>,
     cancel: CancellationToken,
     auth: Option<Credential>,
+    options: Arc<ScanOptions>,
 }
 
 impl ScanContext {
@@ -205,6 +207,7 @@ impl ScanContext {
             progress: None,
             cancel,
             auth: None,
+            options: Arc::new(ScanOptions::default()),
         }
     }
 
@@ -212,6 +215,15 @@ impl ScanContext {
     /// per-context default.
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.http = client;
+        self
+    }
+
+    /// Attach the scan's per-scan options (builder-style). The orchestrator hands
+    /// the running scan's options to every context it builds; a context created
+    /// without this carries an empty set and every default applies. Shared by `Arc`
+    /// so the per-unit context clones stay cheap.
+    pub fn with_options(mut self, options: Arc<ScanOptions>) -> Self {
+        self.options = options;
         self
     }
 
@@ -235,6 +247,15 @@ impl ScanContext {
     /// The credential attached to this context, if any.
     pub fn credential(&self) -> Option<&Credential> {
         self.auth.as_ref()
+    }
+
+    /// The running scan's per-scan options, **read-only**. A scanner consults this
+    /// to adjust its behavior for the scan (e.g. a timing profile or a brute-force
+    /// toggle carried on the scan). This exposes data only: there is no request path
+    /// on the options, so reading them cannot bypass the pacing floor — the only way
+    /// out is still [`send`](Self::send). An empty set means defaults apply.
+    pub fn options(&self) -> &ScanOptions {
+        &self.options
     }
 
     /// Report progress to the context's callback. A no-op when no callback is
@@ -396,6 +417,24 @@ mod tests {
         assert!(matches!(
             c.check_cancellation().await,
             Err(Error::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn options_are_exposed_read_only_and_add_no_unpaced_path() {
+        let opts = Arc::new(ScanOptions::new().with("k", "v"));
+        let c = ctx(CancellationToken::new()).with_options(opts);
+        // A context with no options exposes an empty (default) set.
+        assert!(ctx(CancellationToken::new()).options().is_empty());
+        // Options are readable through the context...
+        assert_eq!(c.options().get("k"), Some("v"));
+        // ...but they are pure data: the only outbound path is still `send`, which
+        // paces and validates the host. Options provide no way to issue a request,
+        // so they cannot introduce an unpaced path.
+        let url = Url::parse("file:///etc/passwd").unwrap();
+        assert!(matches!(
+            c.send(RequestSpec::get(url)).await.unwrap_err(),
+            Error::Target(_)
         ));
     }
 

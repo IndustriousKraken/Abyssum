@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use abyssum_core::scan::BaseScanner;
 use abyssum_core::{
     Config, Error, Finding, Orchestrator, ProgressCallback, ProgressKind, ProgressUpdate,
-    ScanContext, ScannerRegistry, SessionStatus, Severity, Status, Target,
+    ScanContext, ScanOptions, ScannerRegistry, SessionStatus, Severity, Status, Target,
 };
 use async_trait::async_trait;
 use tokio::sync::Notify;
@@ -30,6 +30,11 @@ struct StubScanner {
     block_on_host: Option<String>,
     panic_on_host: Option<String>,
     started: Arc<Notify>,
+    /// Records the per-scan options the stub saw through the context on its last
+    /// `scan` call, so a test can assert what the scan carried to the scanner.
+    /// Shared across clones (the registry factory clones the stub), so the value is
+    /// visible to the test after the run.
+    seen_options: Arc<Mutex<Option<ScanOptions>>>,
 }
 
 impl StubScanner {
@@ -41,6 +46,7 @@ impl StubScanner {
             block_on_host: None,
             panic_on_host: None,
             started: Arc::new(Notify::new()),
+            seen_options: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -58,6 +64,9 @@ impl BaseScanner for StubScanner {
     }
 
     async fn scan(&self, target: &Target, ctx: &ScanContext) -> abyssum_core::Result<Vec<Finding>> {
+        // Record what the scan carried to us through the context (g03).
+        *self.seen_options.lock().unwrap() = Some(ctx.options().clone());
+
         let host = target.host().unwrap_or_default().to_string();
 
         if self.error_on_host.as_deref() == Some(host.as_str()) {
@@ -154,6 +163,67 @@ async fn aggregates_across_multiple_scanners() {
     assert_eq!(session.completed_units, 4);
 }
 
+/// g03: a scan started with a per-scan option records it on the session and carries
+/// it to the scanner through the (read-only) scan context during the run.
+#[tokio::test]
+async fn scan_carries_options_to_scanner_via_context() {
+    let stub = StubScanner::simple("stub", 1);
+    let seen = stub.seen_options.clone();
+    let orch = orchestrator_with(vec![stub]);
+
+    let handle = orch
+        .create_session_with_options(
+            vec![target("a.test")],
+            vec!["stub".into()],
+            ScanOptions::new().with("timing_profile", "organic"),
+        )
+        .unwrap();
+    let id = handle.lock().unwrap().id;
+    let session = orch.run(id, None).await.unwrap();
+
+    // Recorded on the session (the scan's own record)...
+    assert_eq!(session.options.get("timing_profile"), Some("organic"));
+    // ...and the scanner read the same option through the context at run time.
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|o| o.get("timing_profile")),
+        Some("organic")
+    );
+}
+
+/// g03: a scan started with no options behaves exactly as one started before
+/// per-scan options existed — the scanner sees an empty set, defaults apply, and
+/// findings are unchanged. The context still exposes no unpaced request path: the
+/// only way out is `ScanContext::send`, which options never touch.
+#[tokio::test]
+async fn scan_without_options_sees_empty_defaults() {
+    let stub = StubScanner::simple("stub", 2);
+    let seen = stub.seen_options.clone();
+    let orch = orchestrator_with(vec![stub]);
+
+    // The plain run_session / create_session path supplies no options.
+    let session = orch
+        .run_session(vec![target("a.test")], vec!["stub".into()], None)
+        .await
+        .unwrap();
+
+    assert!(session.options.is_empty(), "no options were supplied");
+    assert_eq!(
+        session.findings.len(),
+        2,
+        "defaults → behavior is unchanged"
+    );
+    assert!(
+        seen.lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(ScanOptions::is_empty),
+        "the scanner saw an empty option set",
+    );
+}
+
 /// Task 7.3: the orchestrator forwards progress carrying tested / total /
 /// current during the run, before it reaches a terminal state.
 #[tokio::test]
@@ -237,6 +307,7 @@ async fn cancel_mid_scan_is_prompt_and_keeps_partial_findings() {
         block_on_host: Some("block.test".into()),
         panic_on_host: None,
         started: started.clone(),
+        seen_options: Arc::new(Mutex::new(None)),
     };
     let orch = Arc::new(orchestrator_with(vec![stub]));
 
@@ -277,6 +348,7 @@ async fn scanner_panic_does_not_orphan_session() {
         block_on_host: None,
         panic_on_host: Some("boom.test".into()),
         started: Arc::new(Notify::new()),
+        seen_options: Arc::new(Mutex::new(None)),
     };
     let orch = Arc::new(orchestrator_with(vec![stub]));
 
@@ -330,6 +402,7 @@ async fn per_target_error_is_counted_without_aborting() {
         block_on_host: None,
         panic_on_host: None,
         started: Arc::new(Notify::new()),
+        seen_options: Arc::new(Mutex::new(None)),
     };
     let orch = orchestrator_with(vec![stub]);
     let targets = vec![target("ok1.test"), target("err.test"), target("ok2.test")];

@@ -35,6 +35,9 @@ pub mod idor;
 pub mod openapi_discovery;
 pub mod origin_discovery;
 pub mod rest_discovery;
+/// Reporting an external discovery source that could not be consulted (shared by
+/// the surface-mapping scanners so an empty result is never mistaken for silence).
+mod source_availability;
 pub mod subdomain_recon;
 
 pub use asn_enumeration::AsnEnumerationScanner;

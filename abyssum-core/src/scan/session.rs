@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::finding::Finding;
+use super::options::ScanOptions;
 use super::target::Target;
 
 /// The observable lifecycle of a scan session.
@@ -96,6 +97,14 @@ pub struct ScanSession {
     /// in [`auth`](crate::auth) against this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<i64>,
+    /// The per-scan options this scan was started with (see `g03-add-per-scan-options`).
+    /// Empty for a scan started without options: defaults apply and the scan behaves
+    /// exactly as one started before per-scan options existed. Carried on the session
+    /// so scanners can read the scan's choices through the scan context at run time —
+    /// the orchestrator hands these to every [`ScanContext`](crate::scan::ScanContext)
+    /// it builds for the run.
+    #[serde(default, skip_serializing_if = "ScanOptions::is_empty")]
+    pub options: ScanOptions,
 }
 
 impl ScanSession {
@@ -115,7 +124,16 @@ impl ScanSession {
             started_at: None,
             finished_at: None,
             owner_user_id: None,
+            options: ScanOptions::default(),
         }
+    }
+
+    /// Attach the per-scan options this scan was started with (builder-style). A
+    /// session created without this carries an empty set and applies defaults. The
+    /// orchestrator exposes these to scanners through the scan context during the run.
+    pub fn with_options(mut self, options: ScanOptions) -> Self {
+        self.options = options;
+        self
     }
 
     /// Stamp the owning user's id (builder-style). The web surface calls this at

@@ -706,6 +706,9 @@ pub(crate) fn row_to_session(row: &SqliteRow) -> Result<ScanSession> {
         started_at,
         finished_at,
         owner_user_id,
+        // Per-scan options are consumed live during the run and are not persisted,
+        // so a loaded session carries an empty set (g03).
+        options: Default::default(),
     })
 }
 

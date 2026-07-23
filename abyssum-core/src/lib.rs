@@ -50,9 +50,9 @@ pub use rate_limiter::{Pace, RateLimiter};
 pub use report::{ReportFormat, ReportGenerator, ReportOptions};
 pub use scan::{
     BaseScanner, Credential, Finding, FindingBuilder, FindingId, Identity, Method, Orchestrator,
-    ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanSession,
-    ScannerFactory, ScannerRegistry, SessionHandle, SessionProgress, SessionStatus, Severity,
-    SingleUserAgent, Status, Target, UserAgentSource, run_differential,
+    ProgressCallback, ProgressKind, ProgressUpdate, RequestSpec, ScanContext, ScanOptions,
+    ScanSession, ScannerFactory, ScannerRegistry, SessionHandle, SessionProgress, SessionStatus,
+    Severity, SingleUserAgent, Status, Target, UserAgentSource, run_differential,
 };
 pub use seed::{PooledUserAgent, ReferenceStore, RotatingUserAgent, SeedUserAgent, WordlistEntry};
 pub use tokio_util::sync::CancellationToken;

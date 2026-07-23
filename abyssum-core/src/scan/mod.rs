@@ -21,6 +21,7 @@
 pub mod context;
 pub mod differential;
 pub mod finding;
+pub mod options;
 pub mod orchestrator;
 pub mod progress;
 pub mod registry;
@@ -34,6 +35,7 @@ pub use context::{
 };
 pub use differential::{Identity, run_differential};
 pub use finding::{Finding, FindingBuilder, FindingId, Severity, Status};
+pub use options::ScanOptions;
 pub use orchestrator::{Orchestrator, SessionHandle};
 pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 pub use registry::{ScannerFactory, ScannerRegistry};
