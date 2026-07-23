@@ -15,6 +15,7 @@ use abyssum_core::{
     TIMING_POLICY_OPTION, TagApply, Target, User, execute_custom_request, normalize_url,
     visible_session, visible_sessions,
 };
+use abyssum_scanners::WORDLIST_OPTION;
 use axum::Extension;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -127,13 +128,22 @@ pub async fn scan_page(
 ) -> Response {
     let (csrf, set) = auth::ensure_csrf(&headers);
     let scanners = state.orchestrator.registry().available();
-    // The user's own timing profiles populate the pacing selector (private to them).
+    // The user's own timing profiles + custom wordlists populate the pacing and
+    // wordlist selectors (both private to them).
     let profiles = state
         .timing
         .list_for_user(user.id)
         .await
         .unwrap_or_default();
-    auth::html(view::scan_page(&user, &csrf, &scanners, &profiles), set)
+    let wordlists = state
+        .wordlists
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::scan_page(&user, &csrf, &scanners, &profiles, &wordlists),
+        set,
+    )
 }
 
 /// `GET /` and `GET /dashboard` — stats + sessions + search shell; the default
@@ -366,6 +376,22 @@ pub async fn start_scan(
         options.set(TIMING_POLICY_OPTION, json);
     }
 
+    // Owner-scope the selected custom wordlist (g07): the scan form carries the
+    // chosen list's id under `opt.wordlist`, but the scanner trusts it, so keep it
+    // ONLY when it names one of this user's own lists. A missing, non-numeric, or
+    // foreign id is stripped, leaving the seeded default in force — a crafted id can
+    // never select (or read) another operator's list.
+    let wordlist_ok = match options
+        .get(WORDLIST_OPTION)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+    {
+        Some(id) => matches!(state.wordlists.get_for_user(user.id, id).await, Ok(Some(_))),
+        None => false,
+    };
+    if !wordlist_ok {
+        options.remove(WORDLIST_OPTION);
+    }
+
     // create_session_with_options validates every scanner id up front (unknown →
     // error, no session created), so an unknown id never issues traffic.
     let handle = match state
@@ -546,6 +572,83 @@ pub async fn update_timing_profile(
         Ok(_) => auth::redirect("/timing-profiles", &[]),
         Err(err) => fail_page(StatusCode::BAD_REQUEST, &clean_err(err)),
     }
+}
+
+// --- Custom wordlists ------------------------------------------------------
+
+/// A sane ceiling on one wordlist import's request body (name + CSRF + the pasted
+/// or uploaded text), rejected before parsing so a huge upload cannot exhaust
+/// memory. Comfortably holds a serious recon list (tens of thousands of lines).
+const MAX_WORDLIST_IMPORT_BYTES: usize = 1024 * 1024;
+
+/// `GET /wordlists` — the user's custom wordlists plus an import form (paste or
+/// `.txt` upload). Private to the user (owner-scoped).
+pub async fn wordlists_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+) -> Response {
+    render_wordlists(&state, &user, &headers, None).await
+}
+
+/// `POST /wordlists` — import a wordlist owned by the authenticated user, from
+/// pasted text or an uploaded `.txt` file (both arrive as the `text` field; the
+/// browser reads a chosen file into it client-side). The import is normalized and
+/// the result reported on the re-rendered page rather than imported silently.
+pub async fn import_wordlist(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // Enforce the size ceiling before doing any work on the body.
+    if body.len() > MAX_WORDLIST_IMPORT_BYTES {
+        return fail_page(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "wordlist upload is too large (max 1 MiB)",
+        );
+    }
+    let form = parse_form(&body);
+    if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
+        return forbidden();
+    }
+    let name = field(&form, "name").unwrap_or("").to_string();
+    let text = field(&form, "text").unwrap_or("").to_string();
+
+    let notice = match state.wordlists.import(user.id, &name, &text).await {
+        Ok((list, report)) => format!(
+            "Imported \"{}\": {} entries stored, {} dropped \
+             ({} duplicates, {} blank, {} comments).",
+            list.name,
+            report.imported,
+            report.dropped(),
+            report.dropped_duplicate,
+            report.dropped_blank,
+            report.dropped_comment,
+        ),
+        Err(err) => format!("Import failed: {}", clean_err(err)),
+    };
+    render_wordlists(&state, &user, &headers, Some(notice)).await
+}
+
+/// Render the wordlists page for `user`, listing their lists and (optionally)
+/// surfacing an import notice. Shared by the GET page and the POST import result.
+async fn render_wordlists(
+    state: &AppState,
+    user: &User,
+    headers: &HeaderMap,
+    notice: Option<String>,
+) -> Response {
+    let (csrf, set) = auth::ensure_csrf(headers);
+    let lists = state
+        .wordlists
+        .list_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    auth::html(
+        view::wordlists_page(user, &csrf, &lists, notice.as_deref()),
+        set,
+    )
 }
 
 /// Ceiling on a user-entered pacing delay: one day. Well beyond any realistic

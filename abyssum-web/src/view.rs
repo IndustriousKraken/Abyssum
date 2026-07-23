@@ -9,8 +9,8 @@
 
 use abyssum_core::custom_request::RequestOutcome;
 use abyssum_core::{
-    Finding, Note, PacingPolicy, ScanSession, SessionStatus, Severity, Summary, Tag, TagUsage,
-    TimingProfile, User,
+    CustomWordlist, Finding, Note, PacingPolicy, ScanSession, SessionStatus, Severity, Summary,
+    Tag, TagUsage, TimingProfile, User,
 };
 use uuid::Uuid;
 
@@ -38,6 +38,7 @@ pub fn page(title: &str, user: Option<&User>, body: &str) -> String {
              <a href=\"/scan\">Scan</a><a href=\"/dashboard\">Dashboard</a>\
              <a href=\"/custom-requests\">Custom request</a>\
              <a href=\"/timing-profiles\">Timing</a>\
+             <a href=\"/wordlists\">Wordlists</a>\
              <span class=\"muted\">{name}{admin}</span>\
              <form method=\"post\" action=\"/logout\" style=\"display:inline\">\
              {csrf}<button type=\"submit\">Log out</button></form></nav>",
@@ -126,12 +127,14 @@ pub fn register(csrf: &str, error: Option<&str>) -> String {
     page("Register", None, &body)
 }
 
-/// The start-scan page: pick scanners + targets, choose a timing profile, submit.
+/// The start-scan page: pick scanners + targets, choose a timing profile and an
+/// optional custom wordlist, submit.
 pub fn scan_page(
     user: &User,
     csrf: &str,
     scanner_ids: &[String],
     profiles: &[TimingProfile],
+    wordlists: &[CustomWordlist],
 ) -> String {
     let options = scanner_ids
         .iter()
@@ -156,6 +159,28 @@ pub fn scan_page(
             )
         })
         .collect::<String>();
+    // The wordlist selector: the seeded default plus each of the user's own custom
+    // lists (private to them). The value carried is the list id, owner-scoped
+    // server-side; a blank selection ⇒ the seeded default. Only the subdomain
+    // brute-force pass consumes it today, so it lives beside that toggle.
+    let wordlist_options = wordlists
+        .iter()
+        .map(|w| {
+            format!(
+                "<option value=\"{id}\">{name} ({count} entries)</option>",
+                id = w.id,
+                name = esc(&w.name),
+                count = w.entry_count,
+            )
+        })
+        .collect::<String>();
+    let wordlist_field = format!(
+        "<label>Subdomain wordlist \
+           <select name=\"opt.wordlist\">\
+             <option value=\"\">Seeded default</option>{wordlist_options}\
+           </select></label> \
+         <a href=\"/wordlists\" class=\"muted\">Manage wordlists</a>"
+    );
     let body = format!(
         "<h1>Start a scan</h1>\
          <form method=\"post\" action=\"/scans\">{csrf}\
@@ -172,7 +197,8 @@ pub fn scan_page(
          </fieldset>\
          <fieldset><legend>Subdomain reconnaissance</legend>\
            <label><input type=\"checkbox\" name=\"opt.subdomain_bruteforce\" value=\"true\"> \
-             Active subdomain brute-force (opt-in; off by default, stays passive otherwise)</label>\
+             Active subdomain brute-force (opt-in; off by default, stays passive otherwise)</label><br>\
+           {wordlist_field}\
          </fieldset>\
          <button type=\"submit\">Start scan</button></form>",
         csrf = csrf_field(csrf),
@@ -228,6 +254,60 @@ pub fn timing_profiles_page(user: &User, csrf: &str, profiles: &[TimingProfile])
         default_shape = shape_options("uniform"),
     );
     page("Timing profiles", Some(user), &body)
+}
+
+/// The custom-wordlists page: the user's imported lists plus an import form
+/// (paste or `.txt` upload). Private to the user. An optional `notice` surfaces
+/// the result of the last import (imported/dropped counts, or an error).
+pub fn wordlists_page(
+    user: &User,
+    csrf: &str,
+    lists: &[CustomWordlist],
+    notice: Option<&str>,
+) -> String {
+    let notice_html = notice
+        .map(|n| format!("<p class=\"notice\">{}</p>", esc(n)))
+        .unwrap_or_default();
+    let rows = if lists.is_empty() {
+        "<p class=\"muted\">No custom wordlists yet.</p>".to_string()
+    } else {
+        let items = lists
+            .iter()
+            .map(|w| {
+                format!(
+                    "<li><strong>{name}</strong> \
+                     <span class=\"muted\">{count} entries</span></li>",
+                    name = esc(&w.name),
+                    count = w.entry_count,
+                )
+            })
+            .collect::<String>();
+        format!("<ul class=\"wordlists\">{items}</ul>")
+    };
+    // The file input is read into the textarea client-side (see app.js), so the
+    // server only ever handles pasted/urlencoded text — no multipart parsing. The
+    // `data-wordlist-file` attribute names the textarea id its contents load into.
+    let body = format!(
+        "<h1>Custom wordlists</h1>\
+         <p class=\"muted\">Import your own wordlists — paste terms or upload a <code>.txt</code> \
+           file. Only you can see or select these. On import, entries are trimmed, lowercased, \
+           and de-duplicated, and blank/comment (<code>#</code>) lines are dropped; the result \
+           is reported below. A scan can select one of your lists for active subdomain \
+           brute-force.</p>\
+         {notice_html}\
+         <h2>Your wordlists</h2>{rows}\
+         <h2>Import a wordlist</h2>\
+         <form method=\"post\" action=\"/wordlists\">{csrf}\
+           <label>Name <input name=\"name\" required maxlength=\"80\"></label>\
+           <label>Upload a .txt file \
+             <input type=\"file\" accept=\".txt,text/plain\" data-wordlist-file=\"wordlist-text\"></label>\
+           <label>Or paste terms (one per line)<br>\
+             <textarea id=\"wordlist-text\" name=\"text\" rows=\"10\" cols=\"60\" \
+               placeholder=\"api&#10;www&#10;mail\"></textarea></label>\
+           <button type=\"submit\">Import wordlist</button></form>",
+        csrf = csrf_field(csrf),
+    );
+    page("Custom wordlists", Some(user), &body)
 }
 
 /// A short human description of a pacing policy for the selector labels.

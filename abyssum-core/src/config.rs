@@ -153,6 +153,12 @@ pub struct ScanningConfig {
     /// existence). Off by default: reconnaissance stays passive unless the operator
     /// deliberately opts in (conservative-by-default, aggression opt-in).
     pub subdomain_bruteforce: bool,
+    /// Upper bound on how many wordlist entries a single scan uses (g07). When a
+    /// selected custom wordlist — or the seeded default — holds more than this, the
+    /// scan truncates to the bound and reports the truncation rather than dropping
+    /// the tail silently, so a 50,000-line paste never quietly becomes a fraction of
+    /// itself unnoticed. Applies to the active subdomain brute-force wordlist today.
+    pub max_wordlist_entries: usize,
     /// Lower bound of the **support-infrastructure** pacing window, in seconds.
     /// Support lookups — queries to a third-party service the operator uses to
     /// *map* the target (a public DNS resolver, a certificate-transparency / RDAP
@@ -288,6 +294,9 @@ impl Default for ScanningConfig {
             max_concurrency: 4,
             user_agent_rotation: UserAgentRotation::default(),
             subdomain_bruteforce: false,
+            // A generous default: large enough for a serious recon list, bounded so
+            // a huge paste is truncated (visibly) rather than probed in full.
+            max_wordlist_entries: 2048,
             // Fast but bounded: ~4–20 lookups/s against a public resolver, versus
             // the 1–3s conservative target floor above.
             support_min_delay: 0.05,
@@ -399,6 +408,10 @@ impl Config {
         if let Some(v) = get_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE") {
             self.scanning.subdomain_bruteforce =
                 parse_env("ABYSSUM_SCANNING_SUBDOMAIN_BRUTEFORCE", &v)?;
+        }
+        if let Some(v) = get_env("ABYSSUM_SCANNING_MAX_WORDLIST_ENTRIES") {
+            self.scanning.max_wordlist_entries =
+                parse_env("ABYSSUM_SCANNING_MAX_WORDLIST_ENTRIES", &v)?;
         }
         if let Some(v) = get_env("ABYSSUM_SCANNING_SUPPORT_MIN_DELAY") {
             self.scanning.support_min_delay = parse_env("ABYSSUM_SCANNING_SUPPORT_MIN_DELAY", &v)?;
@@ -676,6 +689,14 @@ mod tests {
         assert_eq!(cfg.scanning.support_min_delay, 0.01);
         assert_eq!(cfg.scanning.support_max_delay, 0.1);
         assert_eq!(cfg.scanning.support_max_concurrency, 32);
+    }
+
+    #[test]
+    fn max_wordlist_entries_defaults_and_overrides() {
+        assert_eq!(Config::default().scanning.max_wordlist_entries, 2048);
+        let env = env_of(&[("ABYSSUM_SCANNING_MAX_WORDLIST_ENTRIES", "50")]);
+        let cfg = Config::load_from("/no/such/file.yaml", env).unwrap();
+        assert_eq!(cfg.scanning.max_wordlist_entries, 50);
     }
 
     #[test]

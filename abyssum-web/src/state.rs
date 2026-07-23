@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use abyssum_core::{
-    AnnotationStore, AuthManager, Config, DatabaseManager, Orchestrator, RateLimiter,
-    ScannerRegistry, TimingProfileStore,
+    AnnotationStore, AuthManager, Config, CustomWordlistStore, DatabaseManager, Orchestrator,
+    RateLimiter, ScannerRegistry, TimingProfileStore,
 };
 use abyssum_scanners::register_builtins;
 use axum::Router;
@@ -43,6 +43,8 @@ pub struct AppState {
     pub annotations: AnnotationStore,
     /// Per-user timing profiles (reusable pacing shapes), gated by owner.
     pub timing: TimingProfileStore,
+    /// Per-user custom wordlists (imported reference lists), gated by owner.
+    pub wordlists: CustomWordlistStore,
     /// The scan engine, shared so background runs and handlers drive one engine.
     pub orchestrator: Arc<Orchestrator>,
     /// Live per-session progress fan-out for the WebSocket endpoint.
@@ -67,6 +69,7 @@ impl AppState {
         let auth = AuthManager::from_database(&db, &config);
         let annotations = AnnotationStore::from_database(&db);
         let timing = TimingProfileStore::from_database(&db);
+        let wordlists = CustomWordlistStore::from_database(&db);
         let limiter = RateLimiter::from_config(&config.scanning);
         let orchestrator = Arc::new(Orchestrator::new(config.clone(), registry));
 
@@ -76,6 +79,7 @@ impl AppState {
             auth,
             annotations,
             timing,
+            wordlists,
             orchestrator,
             hub: Hub::default(),
             limiter,
@@ -103,6 +107,7 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/scan/{id}", get(handlers::scan_detail))
         .route("/custom-requests", get(handlers::custom_page))
         .route("/timing-profiles", get(handlers::timing_profiles_page))
+        .route("/wordlists", get(handlers::wordlists_page))
         .route("/logout", post(handlers::logout))
         .route_layer(from_fn_with_state(state.clone(), require_user_page));
 
@@ -121,6 +126,8 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/timing-profiles/{id}",
             post(handlers::update_timing_profile),
         )
+        // Custom-wordlist import (paste or .txt upload), owned by the user.
+        .route("/wordlists", post(handlers::import_wordlist))
         // Annotations: notes on sessions/findings, color tags, and the
         // note/tag-scoped session searches. All owner-gated in the handlers.
         .route(

@@ -24,3 +24,23 @@
     if (results && window.htmx) window.htmx.trigger(results, "refresh");
   };
 })();
+
+// Wordlist upload → textarea. A file input marked data-wordlist-file="<id>" reads
+// the chosen .txt file client-side into the textarea with that id, so an upload
+// becomes ordinary pasted text and the server never parses multipart form data.
+(function () {
+  var inputs = document.querySelectorAll("[data-wordlist-file]");
+  Array.prototype.forEach.call(inputs, function (input) {
+    input.addEventListener("change", function () {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      var target = document.getElementById(input.getAttribute("data-wordlist-file"));
+      if (!target) return;
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        target.value = e.target.result;
+      };
+      reader.readAsText(file);
+    });
+  });
+})();

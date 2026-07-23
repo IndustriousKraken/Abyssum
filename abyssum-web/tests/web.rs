@@ -769,6 +769,65 @@ async fn security_headers_are_set_on_every_response() {
     );
 }
 
+// --- 10.x Custom wordlist import + per-user visibility (g07) ----------------
+
+/// Importing a wordlist stores a normalized list, reports the outcome on the page,
+/// and the list is offered on the scan form — all private to its owner, so another
+/// user sees neither the list nor it in their scan-form selector.
+#[tokio::test]
+async fn wordlist_import_reports_and_is_private_to_its_owner() {
+    let app = TestApp::spawn().await;
+    let _admin = make_user(&app, "admin").await;
+    let alice = make_user(&app, "alice").await;
+    let _bob = make_user(&app, "bob").await;
+
+    // Alice imports a list with a comment, a duplicate, and mixed case.
+    let mut alice_c = authed_client(&app, "alice").await;
+    let text = "API\napi\n# a comment\nwww";
+    let body = format!(
+        "name={}&text={}&_csrf={}",
+        enc("alice-secret-list"),
+        enc(text),
+        enc(&alice_c.csrf()),
+    );
+    let resp = alice_c.post_form("/wordlists", &body).await;
+    assert_eq!(resp.status, 200);
+    // The import is reported (not silent): 2 kept (api, www), 2 dropped.
+    assert!(
+        resp.body.contains("Imported") && resp.body.contains("alice-secret-list"),
+        "the import result was reported"
+    );
+    assert!(
+        resp.body.contains("2 entries"),
+        "the stored entry count is shown: {}",
+        resp.body
+    );
+    // It was actually stored, owner-scoped.
+    let stored = app.state.wordlists.list_for_user(alice.id).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].entry_count, 2);
+
+    // Alice's scan form offers the list.
+    let scan_page = alice_c.get("/scan").await;
+    assert!(
+        scan_page.body.contains("alice-secret-list"),
+        "alice's scan form offers her list"
+    );
+
+    // Bob sees neither the list on his wordlists page nor in his scan selector.
+    let mut bob_c = authed_client(&app, "bob").await;
+    let bob_lists = bob_c.get("/wordlists").await;
+    assert!(
+        !bob_lists.body.contains("alice-secret-list"),
+        "alice's list leaked onto bob's wordlists page"
+    );
+    let bob_scan = bob_c.get("/scan").await;
+    assert!(
+        !bob_scan.body.contains("alice-secret-list"),
+        "alice's list leaked into bob's scan selector"
+    );
+}
+
 // --- polling helpers -------------------------------------------------------
 
 /// Poll `condition` until true or the timeout elapses.

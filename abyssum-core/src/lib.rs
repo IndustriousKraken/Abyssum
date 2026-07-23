@@ -30,6 +30,7 @@ pub mod report;
 pub mod scan;
 pub mod seed;
 pub mod timing;
+pub mod wordlists;
 
 pub use ai::analyze_finding;
 pub use annotations::{AnnotationStore, DEFAULT_TAG_COLOR, Note, Tag, TagApply, TagUsage};
@@ -60,3 +61,4 @@ pub use timing::{
     DEFAULT_PROFILE_NAME, TIMING_POLICY_OPTION, TimingProfile, TimingProfileStore, builtin_library,
 };
 pub use tokio_util::sync::CancellationToken;
+pub use wordlists::{CustomWordlist, CustomWordlistStore, ImportReport};
