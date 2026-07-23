@@ -23,13 +23,39 @@ curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/in
 ```
 
 This installs `abyssum` (CLI) and `abyssum-web` (web UI) to `/usr/local/bin`, or to
-`~/.local/bin` when run as non-root. Options (pass through `curl … | bash -s --`):
+`~/.local/bin` when run as non-root. **Run in a terminal, it then offers an optional guided
+setup** — run `abyssum-web` as a service, choose how it's exposed, and set up an HTTPS
+reverse proxy. Piped with no terminal (CI, cron), it installs the binaries and stops there.
 
-- `--user` — force install into `~/.local/bin`
+Options (pass through `curl … | bash -s --`):
+
+- `--user` — install into `~/.local/bin`
 - `--version <tag>` — install a specific release instead of the latest
+- `--service` — run `abyssum-web` as a systemd service (Linux)
+- `--expose localhost|all|<ip>` — how the web UI binds (default `localhost`)
+- `--allow-cidr <cidr>` — restrict network access to a CIDR (applied by the proxy)
+- `--proxy` `--site <host>` — set up a Caddy HTTPS reverse proxy (internal, self-signed CA)
+- `--yes` / `--no-wizard` — accept defaults / never prompt
 
-The installer needs only `curl` and `sha256sum` (or `shasum`) — both standard on Linux
-and macOS. Supported targets: Linux x86_64/aarch64, macOS aarch64.
+A full one-shot setup behind HTTPS, unattended:
+
+```sh
+curl -fsSL …/install.sh | bash -s -- --service --proxy --site abyssum.lab --yes
+```
+
+The installer needs only `curl` and `sha256sum` (or `shasum`); service/proxy setup is
+Linux/systemd (and needs `caddy` for the proxy). Supported targets: Linux x86_64/aarch64,
+macOS aarch64. Deployment details — CA trust, DNS, hardening — are in
+[`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
+
+### Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/uninstall.sh | bash -s -- --yes
+```
+
+Removes the binaries, the service, and any proxy config the installer generated. Your data
+is kept unless you add `--purge`.
 
 ### From source
 
@@ -119,47 +145,27 @@ abyssum-web                      # serves on http://127.0.0.1:8000 by default
 The web surface is authenticated (register the first account, which is bootstrapped as
 admin), and shows live scan progress over a WebSocket. Change the bind address in config.
 
-## Multi-user access over the network (HTTPS via Caddy)
+## Deployment (service + HTTPS)
 
 `abyssum-web` binds `127.0.0.1` by default — safe, but localhost-only, which makes its
 multi-user accounts pointless unless everyone shares one keyboard. The supported way to
 give a team access is to keep the app on localhost and put a **TLS reverse proxy** in
 front; `abyssum-web` speaks plain HTTP on purpose and leaves TLS to the proxy.
 
-A helper generates a [Caddy](https://caddyserver.com) config with an internal
-(self-signed) CA — ideal for a LAN or VPN with no public DNS:
+The installer does both — run it in a terminal and accept the prompts, or one-shot it:
 
 ```sh
-deploy/caddy-setup.sh --site abyssum.lab      # or an IP; add --run to start Caddy now
+curl -fsSL …/install.sh | bash -s -- --service --proxy --site abyssum.lab --yes
 ```
 
-Caddy terminates HTTPS on `:443` and proxies to `abyssum-web` on `127.0.0.1:8000`; only
-Caddy faces the network. Trust Caddy's root CA on each client (or `caddy trust` locally)
-to avoid browser warnings. Full walkthrough — CA trust for other machines, DNS/hosts,
-systemd — in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
+That runs `abyssum-web` as a systemd service on `127.0.0.1` and stands up a [Caddy](https://caddyserver.com)
+reverse proxy with an internal (self-signed) CA — ideal for a LAN or VPN with no public DNS.
+Trust Caddy's root CA on each client to avoid browser warnings. To expose the app directly
+instead (trusted networks only — plain HTTP), use `--expose all` or `--expose <ip>`, or
+`--allow-cidr` to limit access to a range.
 
-Do **not** instead expose the app directly with `ABYSSUM_SERVER_HOST=0.0.0.0` on an
-untrusted network: that serves the login and session cookies in cleartext.
-
-## Run as a service (Linux / systemd)
-
-To keep `abyssum-web` running and start it on boot, install it as a systemd service.
-With the binary already installed:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/IndustriousKraken/Abyssum/master/deploy/install-service.sh | sudo bash
-```
-
-That writes `/etc/systemd/system/abyssum-web.service` (running as your user, database in
-`/var/lib/abyssum`), reloads systemd, and enables it. Append `-s -- --host 0.0.0.0` for
-direct LAN access instead of the localhost-behind-Caddy default. A redeploy is then:
-
-```sh
-./install.sh && sudo systemctl restart abyssum-web
-```
-
-`deploy/abyssum-web.service` is the reference unit to install by hand instead, and the
-full deployment walkthrough (with Caddy) is in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
+The full walkthrough — CA trust for other machines, DNS/hosts, systemd hardening, and the
+reference `deploy/` files — is in [`docs/deploy/CADDY.md`](docs/deploy/CADDY.md).
 
 ## Configuration
 

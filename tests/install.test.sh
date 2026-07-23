@@ -47,11 +47,12 @@ build_fixture() {
 }
 
 # $1 = fixture root, $2 = fake HOME. Resolves version from the mock API (no --version).
+# --no-wizard keeps the run non-interactive even when the test is run from a terminal.
 run_install() {
   ABYSSUM_BASE_URL="file://$1/download" \
   ABYSSUM_API_URL="file://$1/latest.json" \
   HOME="$2" \
-  bash "$INSTALL" --user
+  bash "$INSTALL" --user --no-wizard
 }
 
 # --- smoke: good checksums, version resolved from the mock API ---
@@ -80,5 +81,17 @@ if [ -e "${neg_bindir}/abyssum" ] || [ -e "${neg_bindir}/abyssum-web" ]; then
 fi
 echo "PASS: negative install (corrupted artifact rejected, nothing installed)"
 
-rm -rf "$smoke_fix" "$smoke_home" "$neg_fix" "$neg_home"
+# --- uninstall (user scope): removes the installed binaries, keeps nothing behind ---
+# Runs against a fixture HOME with no sudo path exercised (no service/proxy present).
+uninstall_home="$(mktemp -d)"
+mkdir -p "${uninstall_home}/.local/bin"
+printf 'x' > "${uninstall_home}/.local/bin/abyssum"
+printf 'x' > "${uninstall_home}/.local/bin/abyssum-web"
+HOME="$uninstall_home" bash "${ROOT}/uninstall.sh" --yes >/dev/null 2>&1 || fail "uninstall exited non-zero"
+for bin in abyssum abyssum-web; do
+  [ -e "${uninstall_home}/.local/bin/${bin}" ] && fail "uninstall: ${bin} was not removed"
+done
+echo "PASS: uninstall removed the user-scope binaries"
+
+rm -rf "$smoke_fix" "$smoke_home" "$neg_fix" "$neg_home" "$uninstall_home"
 echo "ALL INSTALLER TESTS PASSED"

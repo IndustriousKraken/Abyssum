@@ -25,8 +25,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Lint workflows (actionlint)
         uses: reviewdog/action-actionlint@v1
-      - name: Lint installer (shellcheck)
-        run: shellcheck install.sh
+      - name: Lint installer + uninstaller (shellcheck)
+        run: shellcheck install.sh uninstall.sh
       - name: Installer smoke + negative tests
         run: bash tests/install.test.sh
 

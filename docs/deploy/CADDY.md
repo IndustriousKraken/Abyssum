@@ -10,6 +10,11 @@ the app doesn't reimplement certificate handling).
 This guide uses [Caddy](https://caddyserver.com) with its **internal CA** (a
 self-signed root), which is ideal for a LAN or VPN with no public DNS.
 
+> **The easy path:** `install.sh` does all of this for you —
+> `curl -fsSL …/install.sh | bash -s -- --service --proxy --site abyssum.lab --yes`
+> sets up the service and this proxy in one shot. This document is the detailed
+> reference for doing it by hand or understanding what the installer generated.
+
 ```
    client ──HTTPS :443──▶  Caddy  ──HTTP──▶  abyssum-web (127.0.0.1:8000)
                             (TLS)             (localhost only)
