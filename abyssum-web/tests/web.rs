@@ -1333,6 +1333,59 @@ async fn oversized_document_upload_is_rejected() {
     );
 }
 
+/// A document upload whose *encoded request body* exceeds axum's 2 MiB default
+/// still reaches the handler (and the store's friendly size error), rather than
+/// being cut off with a bare 413. Guards the `DefaultBodyLimit` layer sized from
+/// `max_document_bytes`: without it a >2 MiB body is 413'd before the handler runs,
+/// so the configured cap (default 10 MiB) is unreachable for real uploads.
+#[tokio::test]
+async fn large_document_body_reaches_handler_not_a_bare_413() {
+    // A 3 MiB document cap ⇒ the route admits bodies up to ~6 MiB, well over axum's
+    // 2 MiB default. The upload below is over the cap, so the store rejects it.
+    let app = TestApp::spawn_with(|cfg| cfg.server.max_document_bytes = 3 * 1024 * 1024).await;
+    let alice = make_user(&app, "alice").await;
+    let mut c = authed_client(&app, "alice").await;
+    let eid = create_engagement(&mut c, "Large upload").await;
+
+    // A 3.5 MiB "PDF" (> the 3 MiB cap) → base64+urlencoded body ≈ 5 MiB: safely over
+    // axum's 2 MiB default yet under this route's ~6 MiB limit.
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    pdf.resize(3 * 1024 * 1024 + 512 * 1024, b'A');
+    let body = format!(
+        "kind=file&file_name=big.pdf&file_data={}&_csrf={}",
+        enc(&b64(&pdf)),
+        enc(&c.csrf())
+    );
+    assert!(
+        body.len() > 2 * 1024 * 1024,
+        "the request body must exceed axum's 2 MiB default to exercise the fix"
+    );
+    let resp = c
+        .post_form(&format!("/engagements/{eid}/documents"), &body)
+        .await;
+
+    // Not a bare 413 from axum: the body reached the handler, and the store reported
+    // the over-cap document with a friendly message on a re-rendered page.
+    assert_ne!(
+        resp.status, 413,
+        "the >2 MiB body must not be cut off by axum's default body limit"
+    );
+    assert_eq!(resp.status, 200, "re-renders with a friendly error");
+    assert!(
+        resp.body.to_lowercase().contains("too large"),
+        "friendly size rejection from the store, not a raw 413"
+    );
+    assert!(
+        app.state
+            .engagements
+            .documents(&alice, eid)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the over-cap upload was not stored"
+    );
+}
+
 /// A file whose bytes are HTML/script is stored and served as inert text/plain,
 /// never as active HTML — so it cannot execute in the app's origin (stored-XSS
 /// guard). The served type is decided from the bytes, not the upload's claim.

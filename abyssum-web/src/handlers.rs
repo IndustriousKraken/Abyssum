@@ -754,11 +754,23 @@ pub async fn engagement_detail(
     render_engagement_detail(&state, &user, id, &headers, None).await
 }
 
-/// A sane ceiling on how many extra bytes a document request body may carry beyond
-/// the decoded document itself (base64 inflation ≈ ×1.34 plus urlencoding), added
-/// to twice the configured max so the *store* — not this guard — reports an
-/// oversized document with a clear message.
+/// Slack over twice the configured document cap for an upload's request body:
+/// base64 inflation (≈ ×1.34) plus urlencoding, so a legally-sized document never
+/// trips the transport ceiling before the store can weigh its decoded bytes.
 const DOCUMENT_BODY_SLACK: usize = 64 * 1024;
+
+/// The request-body ceiling for a document upload, derived from the configured
+/// `max_document_bytes`. Sizes the `/engagements/{id}/documents` route's
+/// [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit) so axum does not reject a
+/// legal upload with a bare 413 before the handler runs (its default is 2 MiB,
+/// well under the ~13 MiB base64 body of a 10 MiB document). A realistically
+/// oversized document still reaches the store, which reports it with a clear
+/// message; only a body more than twice the cap is refused at the transport layer.
+pub(crate) fn document_body_cap(max_document_bytes: usize) -> usize {
+    max_document_bytes
+        .saturating_mul(2)
+        .saturating_add(DOCUMENT_BODY_SLACK)
+}
 
 /// `POST /engagements/{id}/documents` — attach a scope/authorization document:
 /// pasted text (`kind=text`), an external URL (`kind=url`), or an uploaded file
@@ -771,20 +783,10 @@ pub async fn attach_document(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    // Reject an absurd body before parsing. The real document-size bound is the
-    // configured `max_document_bytes`, enforced by the store on the decoded bytes.
-    let body_cap = state
-        .config
-        .server
-        .max_document_bytes
-        .saturating_mul(2)
-        .saturating_add(DOCUMENT_BODY_SLACK);
-    if body.len() > body_cap {
-        return fail_page(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "document upload is too large",
-        );
-    }
+    // The request-body ceiling is enforced upstream by the route's
+    // `DefaultBodyLimit` (sized via `document_body_cap` from `max_document_bytes`),
+    // so by here the body is already within it. The real per-document bound is the
+    // configured `max_document_bytes`, applied by the store to the decoded bytes.
     let form = parse_form(&body);
     if !auth::verify_csrf(&headers, field(&form, "_csrf")) {
         return forbidden();

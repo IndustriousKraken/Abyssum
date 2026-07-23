@@ -17,7 +17,7 @@ use abyssum_core::{
 };
 use abyssum_scanners::register_builtins;
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::HeaderValue;
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::Response;
@@ -139,9 +139,14 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         // assign a scan to an engagement. All gated by the engagement's authorized
         // operators (admin sees all) in the handlers.
         .route("/engagements", post(handlers::create_engagement))
+        // Raise this route's request-body limit above axum's 2 MiB default, sized
+        // from `max_document_bytes`, so a legal document upload reaches the handler
+        // (and the store's clear size error) instead of a bare 413 from axum.
         .route(
             "/engagements/{id}/documents",
-            post(handlers::attach_document),
+            post(handlers::attach_document).layer(DefaultBodyLimit::max(
+                handlers::document_body_cap(state.config.server.max_document_bytes),
+            )),
         )
         .route(
             "/engagements/{id}/documents/{doc_id}",
