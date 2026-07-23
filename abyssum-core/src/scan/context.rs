@@ -134,6 +134,16 @@ pub struct RequestSpec {
     /// the scan is otherwise configured with a credential. Pacing, the User-Agent,
     /// cancellation, and progress are unaffected — only the credential is omitted.
     pub omit_credential: bool,
+    /// When `true`, this request is a **support-infrastructure lookup**: a query to
+    /// a third-party service the operator uses to discover or map the target — a
+    /// public DNS resolver, a certificate-transparency log aggregator, an RDAP /
+    /// WHOIS service — rather than traffic to the target itself. It is then paced by
+    /// the separate, faster support policy instead of the target floor and is exempt
+    /// from the target-distress halt (see the rate limiter). Defaults to `false`: a
+    /// request is target traffic unless a scanner marks it with
+    /// [`support_lookup`](Self::support_lookup). Pacing still applies — the support
+    /// lane is a *different* policy, not an unpaced one.
+    pub support_infrastructure: bool,
 }
 
 impl RequestSpec {
@@ -150,6 +160,7 @@ impl RequestSpec {
             headers: Vec::new(),
             body: None,
             omit_credential: false,
+            support_infrastructure: false,
         }
     }
 
@@ -169,6 +180,14 @@ impl RequestSpec {
     /// (builder-style). See [`omit_credential`](Self::omit_credential).
     pub fn without_credential(mut self) -> Self {
         self.omit_credential = true;
+        self
+    }
+
+    /// Mark this request as a support-infrastructure lookup (builder-style), so it
+    /// is paced by the faster support lane rather than held to the target floor. See
+    /// [`support_infrastructure`](Self::support_infrastructure).
+    pub fn support_lookup(mut self) -> Self {
+        self.support_infrastructure = true;
         self
     }
 }
@@ -299,9 +318,17 @@ impl ScanContext {
             .host_str()
             .ok_or_else(|| Error::Target(format!("request URL has no host: {}", request.url)))?
             .to_string();
+        let support = request.support_infrastructure;
 
-        // Pace first — the floor is enforced here, before any bytes leave.
-        match self.rate_limiter.acquire(&host).await {
+        // Pace first — the floor is enforced here, before any bytes leave. A
+        // support-infrastructure lookup uses the separate, faster support lane;
+        // everything else is target traffic held to the conservative floor.
+        let pace = if support {
+            self.rate_limiter.acquire_support(&host).await
+        } else {
+            self.rate_limiter.acquire(&host).await
+        };
+        match pace {
             Pace::Halt => {
                 return Err(Error::Http(format!(
                     "pacing halted further requests to {host}: sustained target distress"
@@ -340,10 +367,15 @@ impl ScanContext {
             .map_err(|e| Error::Http(e.to_string()))?;
 
         // Feed the response back into the limiter so distress grows backoff and
-        // clean completions decay it.
-        self.rate_limiter
-            .record_signal(&host, response.status().as_u16())
-            .await;
+        // clean completions decay it — on the same lane the request used, so a
+        // support service's rate-limit signal backs off the support lane and a
+        // target's distress backs off (and can halt) the target lane.
+        let status = response.status().as_u16();
+        if support {
+            self.rate_limiter.record_signal_support(&host, status).await;
+        } else {
+            self.rate_limiter.record_signal(&host, status).await;
+        }
 
         Ok(response)
     }
@@ -384,6 +416,19 @@ mod tests {
         assert!(!RequestSpec::get(url.clone()).omit_credential);
         // A BAC/IDOR probe opts out explicitly.
         assert!(RequestSpec::get(url).without_credential().omit_credential);
+    }
+
+    #[test]
+    fn request_spec_support_lookup_defaults_off() {
+        let url = Url::parse("https://cloudflare-dns.com/dns-query").unwrap();
+        // By default a request is target traffic.
+        assert!(!RequestSpec::get(url.clone()).support_infrastructure);
+        // A discovery/mapping query to a third-party service opts into the support lane.
+        assert!(
+            RequestSpec::get(url)
+                .support_lookup()
+                .support_infrastructure
+        );
     }
 
     #[tokio::test]

@@ -9,9 +9,13 @@
 //! An **opt-in active brute-force** source (e02) complements the passive one: it
 //! joins the seeded `subdomains` wordlist onto the apex, tests each candidate for
 //! existence via DNS-over-HTTPS (through the same paced request path, so no DNS
-//! resolver dependency is added and the traffic is paced like everything else), and
-//! routes the confirmed-existing names into the *same* liveness + takeover
-//! evaluation as passively-discovered ones. It is **disabled by default**
+//! resolver dependency is added), and routes the confirmed-existing names into the
+//! *same* liveness + takeover evaluation as passively-discovered ones. The DoH
+//! existence tests and the passive CT-log query are **support-infrastructure
+//! lookups** — third-party services queried to map the target — so they ride the
+//! faster support pacing lane rather than the conservative target floor; the
+//! subsequent liveness/takeover probes go to the discovered hosts and are target
+//! traffic. It is **disabled by default**
 //! (`scanning.subdomain_bruteforce`): reconnaissance stays passive unless the
 //! operator turns it on — conservative-by-default, aggression opt-in.
 //!
@@ -721,8 +725,12 @@ async fn doh_resolves(
         .clear()
         .append_pair("name", host)
         .append_pair("type", "A");
-    // The DoH JSON API is selected by the `application/dns-json` Accept header.
-    let spec = RequestSpec::get(url).header("Accept", "application/dns-json");
+    // The DoH JSON API is selected by the `application/dns-json` Accept header. This
+    // is a query to a public resolver to *map* the target, not traffic to the target
+    // itself, so it rides the faster support-infrastructure pacing lane.
+    let spec = RequestSpec::get(url)
+        .header("Accept", "application/dns-json")
+        .support_lookup();
 
     match probe(ctx, spec).await {
         Ok(response) if (200..300).contains(&response.status) => {
@@ -783,7 +791,9 @@ async fn crtsh_query(
         .append_pair("q", &format!("%.{apex}"))
         .append_pair("output", "json");
 
-    let response = match probe(ctx, RequestSpec::get(url)).await {
+    // The passive CT-log aggregator is a third-party source queried to map the
+    // target, so it uses the support-infrastructure pacing lane, not the target floor.
+    let response = match probe(ctx, RequestSpec::get(url).support_lookup()).await {
         Ok(response) => response,
         // Cancellation is not a source failure: surface it rather than masking a
         // cancelled scan as 'no candidates' (matches doh_resolves / the probe loop).

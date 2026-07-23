@@ -464,7 +464,10 @@ async fn passive_dns_query(base: &Url, host: &str, ctx: &ScanContext) -> Result<
     let mut url = base.clone();
     url.query_pairs_mut().clear().append_pair("q", host);
 
-    let response = match probe(ctx, RequestSpec::get(url)).await {
+    // The passive historical-DNS aggregator is a third-party source queried to map
+    // the target, so it rides the support-infrastructure pacing lane. The baseline
+    // fetch and the direct-to-IP confirmation probes remain target traffic.
+    let response = match probe(ctx, RequestSpec::get(url).support_lookup()).await {
         Ok(response) => response,
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(err) => {

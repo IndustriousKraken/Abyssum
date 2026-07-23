@@ -28,9 +28,18 @@
 //! - **Distress stop condition.** When a domain's recent server-error rate stays
 //!   above a threshold over a window, [`acquire`] returns [`Pace::Halt`] so the
 //!   caller stops probing a target that is already struggling.
+//! - **Support-infrastructure lane.** A request marked as a support-infrastructure
+//!   lookup — a query to a third-party service the operator uses to *map* the
+//!   target (a public DNS resolver, a certificate-transparency / RDAP aggregator) —
+//!   is paced through [`acquire_support`] by a separate, faster policy. It is not
+//!   held to the target floor and the target-distress halt never stops it, but it
+//!   still backs off (via [`record_signal_support`]) when the support service itself
+//!   signals rate limiting.
 //!
 //! [`acquire`]: RateLimiter::acquire
+//! [`acquire_support`]: RateLimiter::acquire_support
 //! [`record_signal`]: RateLimiter::record_signal
+//! [`record_signal_support`]: RateLimiter::record_signal_support
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -131,14 +140,52 @@ pub struct RateLimiter {
     inner: Arc<Inner>,
 }
 
-struct Inner {
-    /// Absolute floor on any pacing delay.
+/// One lane's randomized pacing window: a request's base delay is drawn uniformly
+/// from `[min_delay, max_delay]`, and `min_delay` is that lane's floor.
+#[derive(Debug, Clone, Copy)]
+struct Policy {
     min_delay: Duration,
-    /// Upper bound of the randomized base-delay window.
     max_delay: Duration,
-    /// Per-domain state. The mutex is never held across a sleep, so each domain's
-    /// pacing is independent and concurrent scanners interleave freely.
-    domains: Mutex<HashMap<String, DomainState>>,
+}
+
+impl Policy {
+    /// Build a policy, collapsing an inverted window (`max < min`) to `[min, min]`
+    /// so the floor always wins.
+    fn new(min: Duration, max: Duration) -> Self {
+        Self {
+            min_delay: min,
+            max_delay: max.max(min),
+        }
+    }
+
+    /// Draw a fresh uniform base delay in `[min_delay, max_delay]`. Returns
+    /// `min_delay` when the window has zero width (e.g. `min == max`).
+    fn sample(&self) -> Duration {
+        let min = self.min_delay.as_secs_f64();
+        let max = self.max_delay.as_secs_f64();
+        if max <= min {
+            return self.min_delay;
+        }
+        // Inclusive range so the draw matches the documented `[min, max]` band
+        // exactly (the half-open `min..max` could never return `max`).
+        let secs = rand::thread_rng().gen_range(min..=max);
+        Duration::from_secs_f64(secs)
+    }
+}
+
+struct Inner {
+    /// Pacing for target traffic: the conservative floor, backoff, and distress halt.
+    target: Policy,
+    /// Pacing for support-infrastructure lookups (public resolvers, CT/RDAP
+    /// aggregators): a separate, faster window that is NOT held to the target floor
+    /// and whose lane the target-distress halt never stops.
+    support: Policy,
+    /// Per-domain target-traffic state. The mutex is never held across a sleep, so
+    /// each domain's pacing is independent and concurrent scanners interleave freely.
+    target_domains: Mutex<HashMap<String, DomainState>>,
+    /// Per-host support-lookup state, kept separate so a support service's backoff
+    /// never touches target pacing and vice versa.
+    support_domains: Mutex<HashMap<String, DomainState>>,
 }
 
 impl RateLimiter {
@@ -147,25 +194,42 @@ impl RateLimiter {
     /// are clamped to zero, and a `max` below `min` collapses to `min` (the floor
     /// always wins).
     pub fn from_config(cfg: &ScanningConfig) -> Self {
-        Self::new(
+        Self::with_policies(
             Duration::from_secs_f64(cfg.min_delay.max(0.0)),
             Duration::from_secs_f64(cfg.max_delay.max(0.0)),
+            Duration::from_secs_f64(cfg.support_min_delay.max(0.0)),
+            Duration::from_secs_f64(cfg.support_max_delay.max(0.0)),
         )
     }
 
-    /// Build a limiter from explicit min/max delays. If `max < min`, the window
-    /// collapses to `min`.
+    /// Build a limiter from explicit target min/max delays. If `max < min`, the
+    /// window collapses to `min`. The support lane defaults to the same window as
+    /// the target lane; callers that exercise the support lane set it explicitly
+    /// with [`with_policies`](Self::with_policies).
     pub fn new(min: Duration, max: Duration) -> Self {
+        Self::with_policies(min, max, min, max)
+    }
+
+    /// Build a limiter with explicit target and support pacing windows. Either
+    /// window collapses to `[min, min]` when its `max < min`, so each lane's floor
+    /// always wins.
+    pub fn with_policies(
+        target_min: Duration,
+        target_max: Duration,
+        support_min: Duration,
+        support_max: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                min_delay: min,
-                max_delay: max.max(min),
-                domains: Mutex::new(HashMap::new()),
+                target: Policy::new(target_min, target_max),
+                support: Policy::new(support_min, support_max),
+                target_domains: Mutex::new(HashMap::new()),
+                support_domains: Mutex::new(HashMap::new()),
             }),
         }
     }
 
-    /// Wait the appropriate pacing duration before a request to `domain`, then
+    /// Wait the target-traffic pacing duration before a request to `domain`, then
     /// return whether the caller may proceed.
     ///
     /// - The **first** request to a freshly-seen domain returns [`Pace::Proceed`]
@@ -176,14 +240,43 @@ impl RateLimiter {
     /// - If the domain is in sustained distress, returns [`Pace::Halt`] *without*
     ///   sleeping and without sending.
     pub async fn acquire(&self, domain: &str) -> Pace {
-        // Compute the delay under the lock, then release it *before* sleeping: the
-        // mutex must never be held across an `.await` sleep, or one slow domain
-        // would serialize every other domain.
+        self.acquire_on(domain, &self.inner.target, &self.inner.target_domains, true)
+            .await
+    }
+
+    /// Like [`acquire`](Self::acquire) but for a **support-infrastructure lookup**
+    /// (a public DNS resolver, a certificate-transparency / RDAP aggregator): paced
+    /// by the separate, faster support policy, never held to the target floor, and
+    /// never halted by the target-distress stop condition. It still honors any
+    /// backoff grown from the support service's own rate-limit signals (see
+    /// [`record_signal_support`](Self::record_signal_support)).
+    pub async fn acquire_support(&self, domain: &str) -> Pace {
+        self.acquire_on(
+            domain,
+            &self.inner.support,
+            &self.inner.support_domains,
+            false,
+        )
+        .await
+    }
+
+    /// Shared pacing core for one lane: compute the delay under the lock (never held
+    /// across the sleep, or one slow domain would serialize every other), then sleep
+    /// and clear the caller to proceed. `halt_on_distress` gates the distress stop
+    /// condition to the target lane only — support lookups are never halted by the
+    /// target's distress.
+    async fn acquire_on(
+        &self,
+        domain: &str,
+        policy: &Policy,
+        domains: &Mutex<HashMap<String, DomainState>>,
+        halt_on_distress: bool,
+    ) -> Pace {
         let delay = {
-            let mut domains = self.inner.domains.lock().await;
+            let mut domains = domains.lock().await;
             let state = domains.entry(domain.to_string()).or_default();
 
-            if state.in_distress() {
+            if halt_on_distress && state.in_distress() {
                 warn!(
                     domain = %domain,
                     "halting probes: sustained server-error rate indicates target distress"
@@ -197,11 +290,13 @@ impl RateLimiter {
                 return Pace::Proceed;
             }
 
-            let base = self.sample_base();
+            let base = policy.sample();
             let extra = state.backoff;
             // The floor is absolute and asserted right at the sleep site, so it
-            // holds no matter how the delay formula evolves.
-            let delay = (base + extra).max(self.inner.min_delay);
+            // holds no matter how the delay formula evolves. Each lane is floored at
+            // its *own* minimum — the support lane at its faster floor, never the
+            // target one.
+            let delay = (base + extra).max(policy.min_delay);
             debug!(
                 domain = %domain,
                 base_ms = base.as_millis() as u64,
@@ -224,10 +319,32 @@ impl RateLimiter {
     /// - `5xx` responses additionally feed the per-domain distress window that can
     ///   trip [`Pace::Halt`] in [`acquire`](Self::acquire).
     pub async fn record_signal(&self, domain: &str, status: u16) {
+        self.record_on(domain, status, &self.inner.target_domains)
+            .await
+    }
+
+    /// Record the outcome of a completed **support-infrastructure** lookup to
+    /// `domain` by its HTTP status. A rate-limit / distress status from the support
+    /// service (`429`/`403`/`5xx`) grows that service's backoff so the support lane
+    /// still yields when the service pushes back; a clean response decays it. The
+    /// distress window is recorded but never halts the support lane — only
+    /// [`acquire`](Self::acquire) (target traffic) consults it.
+    pub async fn record_signal_support(&self, domain: &str, status: u16) {
+        self.record_on(domain, status, &self.inner.support_domains)
+            .await
+    }
+
+    /// Shared backoff / distress bookkeeping for one lane's per-domain map.
+    async fn record_on(
+        &self,
+        domain: &str,
+        status: u16,
+        domains: &Mutex<HashMap<String, DomainState>>,
+    ) {
         let server_error = (500..600).contains(&status);
         let hostile = status == 429 || status == 403 || server_error;
 
-        let mut domains = self.inner.domains.lock().await;
+        let mut domains = domains.lock().await;
         let state = domains.entry(domain.to_string()).or_default();
 
         // Only 5xx counts toward the *distress* window; 429/403 grow backoff but are
@@ -256,20 +373,6 @@ impl RateLimiter {
                 );
             }
         }
-    }
-
-    /// Draw a fresh uniform base delay in `[min_delay, max_delay]`. Returns
-    /// `min_delay` when the window has zero width (e.g. `min == max`).
-    fn sample_base(&self) -> Duration {
-        let min = self.inner.min_delay.as_secs_f64();
-        let max = self.inner.max_delay.as_secs_f64();
-        if max <= min {
-            return self.inner.min_delay;
-        }
-        // Inclusive range so the draw matches the documented `[min, max]` band
-        // exactly (the half-open `min..max` could never return `max`).
-        let secs = rand::thread_rng().gen_range(min..=max);
-        Duration::from_secs_f64(secs)
     }
 }
 
@@ -541,6 +644,139 @@ mod tests {
             rl.acquire("alpha.test").await,
             Pace::Proceed,
             "a partial-window error burst must not halt"
+        );
+    }
+
+    // --- g04: the support lane -------------------------------------------------
+
+    /// A limiter with distinct target and support windows, for the support-lane
+    /// tests. All four values are seconds.
+    fn lanes(t_min: f64, t_max: f64, s_min: f64, s_max: f64) -> RateLimiter {
+        RateLimiter::with_policies(
+            Duration::from_secs_f64(t_min),
+            Duration::from_secs_f64(t_max),
+            Duration::from_secs_f64(s_min),
+            Duration::from_secs_f64(s_max),
+        )
+    }
+
+    /// `acquire_support` timed like [`timed_acquire`], under the paused clock.
+    async fn timed_acquire_support(rl: &RateLimiter, domain: &str) -> (Pace, Duration) {
+        let start = Instant::now();
+        let pace = rl.acquire_support(domain).await;
+        (pace, start.elapsed())
+    }
+
+    // Support lookups are paced by the faster support window, not the target floor.
+    #[tokio::test(start_paused = true)]
+    async fn support_lookups_are_not_paced_at_the_target_floor() {
+        // Target floor 2s; support window a fast, bounded 0.1s.
+        let rl = lanes(2.0, 2.0, 0.1, 0.1);
+
+        // Target lane: first free, then held at the 2s floor.
+        let _ = rl.acquire("target.test").await;
+        let (_, target_delay) = timed_acquire(&rl, "target.test").await;
+        assert!(
+            target_delay >= Duration::from_secs_f64(2.0),
+            "target probe must sit at the floor, got {target_delay:?}"
+        );
+
+        // Support lane: first free, then paced by the fast support window — well
+        // below the target floor, yet still honoring its own (fast) floor.
+        let _ = rl.acquire_support("resolver.test").await;
+        let (pace, support_delay) = timed_acquire_support(&rl, "resolver.test").await;
+        assert_eq!(pace, Pace::Proceed);
+        assert!(
+            support_delay < Duration::from_secs_f64(2.0),
+            "support lookup must not be held to the target floor, got {support_delay:?}"
+        );
+        assert!(
+            support_delay >= Duration::from_secs_f64(0.1),
+            "support lookup still honors its own fast floor, got {support_delay:?}"
+        );
+    }
+
+    // The target-distress halt never stops a support lookup, even to the same host.
+    #[tokio::test(start_paused = true)]
+    async fn target_distress_does_not_halt_support_lookups() {
+        let rl = lanes(1.0, 1.0, 0.1, 0.1);
+
+        // Drive a domain into sustained target distress on the target lane.
+        for _ in 0..DISTRESS_WINDOW {
+            rl.record_signal("dns.test", 500).await;
+        }
+        assert_eq!(
+            rl.acquire("dns.test").await,
+            Pace::Halt,
+            "sustained 5xx must halt target probing"
+        );
+
+        // The very same host, queried as a support lookup, is never halted by the
+        // target's distress — the two lanes keep independent state.
+        assert_eq!(
+            rl.acquire_support("dns.test").await,
+            Pace::Proceed,
+            "target distress must not halt a support lookup"
+        );
+        assert_eq!(
+            rl.acquire_support("dns.test").await,
+            Pace::Proceed,
+            "and stays un-halted on subsequent support lookups"
+        );
+    }
+
+    // A support service that returns a rate-limit signal still triggers backoff on
+    // the support lane, and the target lane is untouched by it.
+    #[tokio::test(start_paused = true)]
+    async fn support_rate_limit_signal_backs_off_the_support_lane() {
+        // Fixed support window so the base delay is constant and backoff is visible.
+        let rl = lanes(1.0, 1.0, 0.1, 0.1);
+        let _ = rl.acquire_support("resolver.test").await; // free first request
+
+        let (_, before) = timed_acquire_support(&rl, "resolver.test").await;
+        // The support service pushes back with a 429.
+        rl.record_signal_support("resolver.test", 429).await;
+        let (_, after) = timed_acquire_support(&rl, "resolver.test").await;
+        assert!(
+            after > before,
+            "a support-service rate-limit signal must grow the support backoff: {after:?} !> {before:?}"
+        );
+
+        // The target lane saw none of this — its state is independent, so this host's
+        // first *target* request is still free.
+        let (_, target_first) = timed_acquire(&rl, "resolver.test").await;
+        assert_eq!(
+            target_first,
+            Duration::ZERO,
+            "the support signal must not touch the target lane"
+        );
+    }
+
+    // A big resolver phase finishes far faster than the same many target probes —
+    // the whole point of g04 (a ~2000-lookup brute-force must not serialize at the
+    // target floor).
+    #[tokio::test(start_paused = true)]
+    async fn support_phase_completes_far_faster_than_target_probes() {
+        const N: usize = 50;
+        // Target floor 1s vs a 0.05s support window.
+        let rl = lanes(1.0, 1.0, 0.05, 0.05);
+
+        let target_start = Instant::now();
+        for _ in 0..N {
+            let _ = rl.acquire("target.test").await;
+        }
+        let target_total = target_start.elapsed();
+
+        let support_start = Instant::now();
+        for _ in 0..N {
+            let _ = rl.acquire_support("resolver.test").await;
+        }
+        let support_total = support_start.elapsed();
+
+        // Both got one free first request; the rest are paced by their lane.
+        assert!(
+            support_total * 4 < target_total,
+            "support phase ({support_total:?}) should be far faster than {N} target probes ({target_total:?})"
         );
     }
 }
