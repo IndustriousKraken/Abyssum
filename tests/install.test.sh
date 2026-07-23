@@ -114,5 +114,16 @@ if grep -qE '^[[:space:]]*(\$SUDO[[:space:]]+)?caddy[[:space:]]+untrust' "${ROOT
 fi
 echo "PASS: uninstaller reports the shared CA without removing it"
 
+# --- guard: a foreign proxy config is never overwritten without consent ---
+# Replacing /etc/caddy/Caddyfile must be gated on --force-proxy or an interactive
+# prompt, and the operator must be told when their chosen settings were not applied.
+grep -q -- '--force-proxy' "$INSTALL" \
+  || fail "install.sh lost the --force-proxy escape hatch"
+grep -q 'were NOT applied' "$INSTALL" \
+  || fail "install.sh no longer reports that chosen proxy settings went unapplied"
+grep -q 'PROXY_BACKUP' "$INSTALL" \
+  || fail "install.sh no longer backs up a replaced Caddyfile"
+echo "PASS: foreign proxy config is protected, reported, and backed up on replace"
+
 rm -rf "$smoke_fix" "$smoke_home" "$neg_fix" "$neg_home" "$uninstall_home"
 echo "ALL INSTALLER TESTS PASSED"

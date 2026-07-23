@@ -30,6 +30,7 @@ PROXY_BIND="all"       # all | loopback — which addresses the PROXY serves on
 ALLOW_CIDR=""
 SITE=""
 ASSUME_YES=0
+FORCE_PROXY=0          # replace an existing, non-abyssum-managed proxy config
 NO_WIZARD=0
 DO_UNINSTALL=0
 HAVE_SETUP_FLAG=0
@@ -48,6 +49,7 @@ Setup options (Linux/systemd; supplying any of these implies non-interactive set
   --proxy              set up a Caddy HTTPS reverse proxy (internal, self-signed CA)
   --site <host|ip>     hostname/IP for the proxy (default: this host's primary IP)
   --proxy-bind <where> all (default) | loopback — which addresses the PROXY serves on
+  --force-proxy        replace an existing hand-written Caddyfile (backs it up first)
   --allow-cidr <cidr>  restrict access to this CIDR (enforced at the proxy)
 
 The web UI itself always stays on 127.0.0.1; network reach comes from the proxy.
@@ -73,6 +75,7 @@ while [ $# -gt 0 ]; do
     --proxy) DO_PROXY=1; HAVE_SETUP_FLAG=1; shift ;;
     --no-proxy) DO_PROXY=0; HAVE_SETUP_FLAG=1; shift ;;
     --proxy-bind) PROXY_BIND="${2:?--proxy-bind needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
+    --force-proxy) FORCE_PROXY=1; HAVE_SETUP_FLAG=1; shift ;;
     --allow-cidr) ALLOW_CIDR="${2:?--allow-cidr needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
     --site) SITE="${2:?--site needs a value}"; HAVE_SETUP_FLAG=1; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -310,23 +313,51 @@ ${body}
 
   local cf=/etc/caddy/Caddyfile
   $SUDO mkdir -p /etc/caddy
+  PROXY_BACKUP=""
   if [ -f "$cf" ] && ! $SUDO grep -q 'abyssum-managed' "$cf" 2>/dev/null; then
-    # A hand-written Caddyfile already fronts abyssum-web — leave it as-is.
-    if $SUDO grep -q '127.0.0.1:8000' "$cf" 2>/dev/null; then
-      echo "install.sh: /etc/caddy/Caddyfile already proxies abyssum-web (127.0.0.1:8000); leaving it as-is."
+    # A Caddyfile we did not generate. Never overwrite it silently — the operator's
+    # chosen site/reach/CIDR would vanish without a word.
+    local replace=0
+    if [ "$FORCE_PROXY" -eq 1 ]; then
+      replace=1
+    elif [ "$ASSUME_YES" -eq 0 ] && [ -r /dev/tty ] && { [ -t 0 ] || [ -t 1 ]; }; then
+      if ask "  /etc/caddy/Caddyfile is hand-written. Replace it with the generated config? [y/N]" "N"; then
+        replace=1
+      fi
+    fi
+
+    if [ "$replace" -eq 1 ]; then
+      PROXY_BACKUP="${cf}.bak-$(date +%Y%m%d%H%M%S)"
+      $SUDO cp "$cf" "$PROXY_BACKUP"
+      echo "install.sh: backed up your Caddyfile to ${PROXY_BACKUP}"
+    elif $SUDO grep -q '127.0.0.1:8000' "$cf" 2>/dev/null; then
+      # It already fronts abyssum-web, so the app is served — but say plainly that the
+      # settings just chosen were NOT applied.
+      echo "install.sh: /etc/caddy/Caddyfile is hand-written and already proxies abyssum-web; left unchanged." >&2
+      echo "install.sh: your chosen site/reach/CIDR were NOT applied to it." >&2
+      echo "install.sh: to apply them, re-run with --force-proxy (backs the file up first)," >&2
+      echo "install.sh: or edit /etc/caddy/Caddyfile yourself." >&2
       $SUDO systemctl reload caddy >/dev/null 2>&1 || true
       return 0
+    else
+      # Foreign config that does not front abyssum-web: leave it, stage ours alongside.
+      printf '%s\n' "$generated" | $SUDO tee /etc/caddy/abyssum.caddyfile >/dev/null
+      echo "install.sh: your /etc/caddy/Caddyfile was left intact; your settings were written to" >&2
+      echo "install.sh: /etc/caddy/abyssum.caddyfile but are NOT active yet. Activate them by adding" >&2
+      echo "install.sh: this line to /etc/caddy/Caddyfile and reloading caddy:" >&2
+      echo "    import abyssum.caddyfile" >&2
+      return 0
     fi
-    # Otherwise don't clobber it: drop a sibling and tell the operator to import it.
-    printf '%s\n' "$generated" | $SUDO tee /etc/caddy/abyssum.caddyfile >/dev/null
-    echo "install.sh: your /etc/caddy/Caddyfile was left intact; wrote /etc/caddy/abyssum.caddyfile." >&2
-    echo "install.sh: to activate the proxy, add this line to /etc/caddy/Caddyfile and reload caddy:" >&2
-    echo "    import abyssum.caddyfile" >&2
-    return 0
   fi
   printf '%s\n' "$generated" | $SUDO tee "$cf" >/dev/null
-  $SUDO caddy validate --adapter caddyfile --config "$cf" \
-    || { echo "install.sh: generated Caddyfile failed validation." >&2; return 1; }
+  if ! $SUDO caddy validate --adapter caddyfile --config "$cf"; then
+    echo "install.sh: generated Caddyfile failed validation." >&2
+    if [ -n "$PROXY_BACKUP" ]; then
+      $SUDO cp "$PROXY_BACKUP" "$cf"
+      echo "install.sh: restored your previous Caddyfile from ${PROXY_BACKUP}" >&2
+    fi
+    return 1
+  fi
   if $SUDO systemctl list-unit-files caddy.service >/dev/null 2>&1; then
     $SUDO systemctl reload caddy 2>/dev/null || $SUDO systemctl restart caddy
   fi

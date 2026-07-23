@@ -35,6 +35,9 @@ Options (pass through `curl … | bash -s --`):
 - `--proxy` `--site <host>` — set up a Caddy HTTPS reverse proxy (internal, self-signed CA)
 - `--proxy-bind all|loopback` — which addresses the **proxy** serves on (default `all`)
 - `--allow-cidr <cidr>` — restrict access to a CIDR (enforced at the proxy)
+- `--force-proxy` — replace an existing hand-written Caddyfile (backs it up first). Without
+  it, a Caddyfile the installer didn't generate is left alone and your proxy settings are
+  reported as not applied.
 - `--yes` / `--no-wizard` — accept defaults / never prompt
 
 A full one-shot setup behind HTTPS, unattended:
