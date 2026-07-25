@@ -98,7 +98,7 @@ detect_ip() {
 # --- uninstall short-circuits everything else ---
 if [ "$DO_UNINSTALL" -eq 1 ]; then
   STEP="uninstalling"
-  self_dir="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" 2>/dev/null && pwd || true)"
+  self_dir="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" 2>/dev/null && pwd)" || self_dir=""
   if [ -n "$self_dir" ] && [ -f "${self_dir}/uninstall.sh" ]; then
     if [ "$ASSUME_YES" -eq 1 ]; then exec bash "${self_dir}/uninstall.sh" --yes; fi
     exec bash "${self_dir}/uninstall.sh"

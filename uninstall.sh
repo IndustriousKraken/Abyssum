@@ -83,7 +83,9 @@ for cf in /etc/caddy/Caddyfile /etc/caddy/abyssum.caddyfile; do
   if [ -f "$cf" ] && grep -q 'abyssum-managed' "$cf" 2>/dev/null; then
     del "$cf"
     removed_proxy=1
-    command -v systemctl >/dev/null 2>&1 && $SUDO systemctl reload caddy >/dev/null 2>&1 || true
+    if command -v systemctl >/dev/null 2>&1; then
+      $SUDO systemctl reload caddy >/dev/null 2>&1 || true
+    fi
   fi
 done
 
